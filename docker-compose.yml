@@ -1,0 +1,33 @@
+# TimescaleDB backing store for the order book (Phase E).
+#
+#   docker compose up -d
+#   $env:DATABASE_URL = "postgres://orderbook:orderbook@localhost:5432/orderbook"
+#   cargo run -p server --bin server -- --feed-rate 2000
+#
+# The schema in db/schema.sql is applied automatically on first volume
+# creation (docker-entrypoint-initdb.d).
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: orderbook-db
+    environment:
+      POSTGRES_USER: orderbook
+      POSTGRES_PASSWORD: orderbook
+      POSTGRES_DB: orderbook
+    # 5434 is used instead of 5432: this machine already runs a host Postgres
+# and another container on 5432. Override with: docker compose -p orderbook-manual up
+    ports:
+      - "5434:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderbook -d orderbook"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  db_data:

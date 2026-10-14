@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Order Book</title>
+    <style>
+      :root {
+        --bid: #0f9960;
+        --ask: #d64545;
+        --bg: #14161a;
+        --panel: #1d2027;
+        --text: #e7e9ee;
+        --muted: #9aa4b2;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      }
+      header { display: flex; flex-wrap: wrap; gap: 1rem 1.5rem; align-items: center; padding: .6rem 1rem; border-bottom: 1px solid #2a2f38; }
+      header h1 { font-size: 15px; margin: 0; }
+      .stats { display: flex; align-items: center; gap: 1.1rem; flex: 1; }
+      .stat { display: flex; flex-direction: column; line-height: 1.15; }
+      .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+      .stat-value { font-variant-numeric: tabular-nums; }
+      .feed-control { margin-left: auto; }
+      .pill { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+      .pill.live { background: #123d2b; color: #3ddc97; }
+      .pill.dead { background: #3d1212; color: #ff7a7a; }
+      main { display: grid; grid-template-columns: 300px 300px minmax(420px, 1fr); gap: 1rem; padding: 1rem; align-items: start; }
+      section { background: var(--panel); border: 1px solid #2a2f38; border-radius: 8px; }
+      section h2 { margin: 0; padding: .5rem .75rem; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid #2a2f38; }
+      .row { display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 2px 8px; font-variant-numeric: tabular-nums; position: relative; }
+      .row.header { color: var(--muted); border-bottom: 1px solid #23272f; }
+      .row .num { text-align: right; }
+      .bid { color: var(--bid); }
+      .ask { color: var(--ask); }
+      .depth-bar { position: absolute; top: 0; bottom: 0; right: 0; pointer-events: none; }
+      .spread-row { grid-template-columns: 1fr; color: var(--muted); font-style: italic; }
+      .book .row > span { position: relative; }
+      .tape .row.header { color: var(--muted); }
+      .chart { min-width: 0; }
+      input[type="number"] { background: #14161a; border: 1px solid #333a46; color: var(--text); padding: 2px 6px; border-radius: 4px; width: 90px; }
+      button { background: #2a3150; border: 1px solid #3a4566; color: var(--text); padding: 3px 10px; border-radius: 4px; cursor: pointer; }
+      .muted { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

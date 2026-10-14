@@ -1,0 +1,16 @@
+[package]
+name = "feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire protocol (JSON messages) and synthetic order feed for the matching engine"
+
+[dependencies]
+engine = { path = "../engine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
