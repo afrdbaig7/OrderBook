@@ -1,0 +1,12 @@
+# Development override: publishes TimescaleDB to host port 5434
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d timescaledb
+#
+# Connect from host at:
+#   postgres://orderbook:orderbook@localhost:5434/orderbook
+
+services:
+  timescaledb:
+    ports:
+      - "5434:5432"

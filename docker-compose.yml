@@ -1,11 +1,17 @@
-# TimescaleDB backing store for the order book (Phase E).
+# Full-stack order book deployment:
 #
-#   docker compose up -d
-#   $env:DATABASE_URL = "postgres://orderbook:orderbook@localhost:5432/orderbook"
-#   cargo run -p server --bin server -- --feed-rate 2000
+#   docker compose up --build
 #
-# The schema in db/schema.sql is applied automatically on first volume
-# creation (docker-entrypoint-initdb.d).
+# Access the web dashboard at: http://localhost:5173
+#
+# To stop without losing persistent database data:
+#   docker compose down
+#
+# To stop and permanently remove database data:
+#   docker compose down -v
+#
+# For native development with host database access (port 5434):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d timescaledb
 
 services:
   timescaledb:
@@ -15,10 +21,6 @@ services:
       POSTGRES_USER: orderbook
       POSTGRES_PASSWORD: orderbook
       POSTGRES_DB: orderbook
-    # 5434 is used instead of 5432: this machine already runs a host Postgres
-# and another container on 5432. Override with: docker compose -p orderbook-manual up
-    ports:
-      - "5434:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./db/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
@@ -27,6 +29,36 @@ services:
       interval: 2s
       timeout: 2s
       retries: 30
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: orderbook-server
+    environment:
+      - DATABASE_URL=postgres://orderbook:orderbook@timescaledb:5432/orderbook
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: orderbook-web
+    ports:
+      - "5173:80"
+    depends_on:
+      server:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

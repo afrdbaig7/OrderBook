@@ -1,0 +1,41 @@
+# Stage 1: Build binary
+FROM rust:1-slim-bookworm AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace sources, toolchain, and manifests
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
+COPY crates/engine/ crates/engine/
+COPY crates/feed/ crates/feed/
+COPY crates/bench/ crates/bench/
+COPY crates/server/ crates/server/
+
+# Compile server binary in release mode with locked dependencies
+RUN cargo build --release --locked -p server --bin server
+
+# Stage 2: Runtime image
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 10001 appuser
+
+COPY --from=builder /app/target/release/server /usr/local/bin/server
+
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=2s --timeout=2s --start-period=3s --retries=30 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["server"]
+CMD ["--port", "8080"]
