@@ -23,8 +23,8 @@ export interface OrderBookState {
  * Networking and book mutation happen **outside** React, in a
  * [`MarketStore`] held in a ref: incoming messages never trigger a render.
  * A single `requestAnimationFrame` loop publishes a fresh snapshot to React at
- * screen refresh rate, so a 5,000+ msg/s stream costs at most one render per
- * frame (spec §40, §44). Sequence-gap detection lives in the store; on a gap
+ * screen refresh rate, so a high-frequency stream costs at most one render per
+ * frame. Sequence-gap detection lives in the store; on a gap
  * the socket is closed and a fresh snapshot is requested automatically.
  */
 export function useOrderBook(

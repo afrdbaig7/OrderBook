@@ -10,8 +10,8 @@ function formatTime(ts: number): string {
 }
 
 /**
- * Trade tape (spec §42): the latest [`MAX`] executions, newest first, bounded
- * (the store caps the list). Bid-taking trades print green, ask-taking red.
+ * Trade tape: the latest executions, newest first, bounded in size.
+ * Bid-taking trades render green, ask-taking red.
  */
 export function Tape({ trades }: { trades: Trade[] }) {
   return (

@@ -1,7 +1,7 @@
 import type { LadderSnapshot, LadderRow } from "../lib/store";
 
 /**
- * Depth ladder (spec §41): asks with the best (lowest) at the bottom, spread,
+ * Depth ladder: asks with the best (lowest) at the bottom, spread,
  * then bids with the best (highest) at the top — so the two best prices sit
  * adjacent around the spread. Columns are price / size / cumulative size; the
  * depth bar is proportional to **cumulative** size. Values stay integers here;

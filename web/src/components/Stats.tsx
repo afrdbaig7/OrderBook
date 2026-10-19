@@ -9,7 +9,7 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "bi
   );
 }
 
-/** Header readouts: connection, spread/midpoint/last, and throughput (spec §39). */
+/** Header readouts: connection status, spread/midpoint/last price, and throughput. */
 export function Stats({
   state,
   status,

@@ -1,16 +1,16 @@
 // Mutable client-side market state, written to at network speed and read at
-// render speed (spec §40, §44).
+// render speed.
 //
 // The React hooks never call `setState` per message: the WebSocket handler
 // mutates this store inside a ref and a `requestAnimationFrame` loop publishes
 // an immutable snapshot to the UI at screen refresh rate. Everything here is
-// integer-valued until a component formats it for display (spec §41).
+// integer-valued until a component formats it for display.
 
 import { PureOrderBook, type Trade, type WireMessage } from "./protocol";
 
-/** Trade tape is bounded (spec §42). */
+/** Trade tape is bounded. */
 export const TAPE_LIMIT = 50;
-/** Default ladder depth published to the UI (spec §41). */
+/** Default ladder depth published to the UI. */
 export const DEFAULT_DEPTH = 20;
 
 export interface LadderRow {
