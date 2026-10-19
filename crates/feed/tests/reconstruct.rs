@@ -1,4 +1,4 @@
-//! End-to-end Phase D test: a synthetic feed drives the engine, every event
+//! End-to-end reconstruction test: a synthetic feed drives the engine, every event
 //! is serialized to JSON, and a client reconstructs the book **from the
 //! serialized bytes**. The reconstruction must equal the engine state after
 //! every single operation.

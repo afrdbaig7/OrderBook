@@ -1,34 +1,14 @@
 //! Deterministic synthetic order flow.
 //!
-//! Generates a reproducible stream of [`Command`]s (limit / market /
-//! cancel) for demos, load generation and integration tests. A fixed seed
-//! always produces the identical command sequence on every machine, which
-//! is what lets the protocol tests assert exact reconstructions.
-//!
-//! # Flow model (spec §23)
-//!
-//! * **Mid price** follows a bounded random walk (mean-reverting at the
-//!   edges of `[mid - walk_range, mid + walk_range]`).
-//! * **Price offset** from the mid is geometric-like: each extra tick away
-//!   from the touch has probability ½, so most orders cluster at the best
-//!   bid/ask and depth tails off quickly.
-//! * **Order size** is skewed small: `1 + r² / max_qty` for uniform `r`,
-//!   so size 1–2 dominates while the full range stays reachable.
-//! * **Operation mix** is configurable by percentage (limit / cancel /
-//!   market).
-//! * **Cancels** target ids the feed has submitted, so they usually hit
-//!   real resting orders (an order may already be gone; the engine then
-//!   rejects the cancel — realistic, and still consumes a sequence number).
-//!
-//! The feed is **integer-only** and clock-free: `orders per second` pacing
-//! is a server concern (see `crates/server`), so the command stream stays
-//! deterministic regardless of feed rate.
+//! A fixed seed always produces the same command sequence. Prices follow a
+//! bounded random walk; sizes are skewed small. The feed is clock-free;
+//! pacing is handled by the server.
 
 use engine::{Event, Order, OrderBook, OrderId, Price, Side};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-/// One order-book request. Applying it to the engine yields events.
+/// One order-book command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Limit(Order),
@@ -94,7 +74,6 @@ pub struct SyntheticFeed {
 }
 
 impl SyntheticFeed {
-    /// Creates a feed from an explicit configuration.
     pub fn new(config: FeedConfig) -> Self {
         assert!(
             config.limit_pct as u16 + config.cancel_pct as u16 <= 100,
@@ -114,7 +93,6 @@ impl SyntheticFeed {
         }
     }
 
-    /// Feed with default tunables and the given seed.
     pub fn seeded(seed: u64) -> Self {
         Self::new(FeedConfig {
             seed,
@@ -122,7 +100,6 @@ impl SyntheticFeed {
         })
     }
 
-    /// Current mid price (useful for tests and demos).
     pub fn mid(&self) -> u64 {
         self.mid
     }
@@ -204,7 +181,6 @@ impl SyntheticFeed {
         Command::Cancel(id)
     }
 
-    /// Produces the next command in the deterministic stream.
     pub fn next_command(&mut self) -> Command {
         let roll = self.rng.random_range(0u8..100);
         if roll < self.config.limit_pct {
@@ -216,8 +192,6 @@ impl SyntheticFeed {
         }
     }
 
-    /// Number of limit ids the feed believes are live (drives cancel
-    /// selection; not book truth).
     pub fn live_hint(&self) -> usize {
         self.live.len()
     }

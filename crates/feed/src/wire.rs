@@ -1,43 +1,11 @@
-//! WebSocket wire protocol: the exact JSON a browser client sees.
+//! WebSocket wire protocol — the JSON messages a browser client sees.
 //!
-//! One `Message` per engine [`Event`], plus the `snapshot` bootstrap. The
-//! engine never serializes anything itself — this module is the single
-//! translation layer, so the wire format can change without touching the
-//! matching core.
+//! One `Message` per engine [`Event`], plus the `snapshot` bootstrap.
+//! The engine never serializes anything itself; this is the one place
+//! where internal events become JSON.
 //!
-//! # Message types
-//!
-//! | `type` | meaning | mutates client book? |
-//! |--------|---------|----------------------|
-//! | `snapshot` | full book image, resets client state | yes (replaces) |
-//! | `delta` | new total qty at one level (`0` = delete) | yes |
-//! | `trade` | a fill between maker and taker | no |
-//! | `ack` | an order was accepted and rested | no |
-//! | `cancel` | a resting order was removed | no |
-//! | `reject` | a request was refused | no |
-//!
-//! `ack`/`cancel`/`reject`/`trade` carry no book mutation, but they **are
-//! sent**: every event consumes one sequence number, and a client that
-//! skipped them would see gaps in `seq` and wrongly declare itself
-//! desynchronized.
-//!
-//! # Sequence semantics
-//!
-//! Every message carries the engine-assigned `seq`. Clients apply `delta`s
-//! in order and require `seq == last_seq + 1`; a gap means a dropped
-//! message and the client must reconnect for a fresh snapshot. A snapshot
-//! carries the last applied `seq`, and any buffered message with
-//! `seq <= snapshot.seq` is stale and ignored.
-//!
-//! # Timestamps
-//!
-//! The pure engine has no clock, so engine events carry no wall-clock time.
-//! The server stamps `trade` messages with receive time in epoch
-//! milliseconds via [`Message::with_timestamp`]; all other message types
-//! ignore timestamps. `from_event` therefore yields `ts = 0` for trades,
-//! which keeps the mapping deterministic for tests.
-//!
-//! # JSON shape
+//! `ack`, `cancel`, and `reject` don't mutate the client book but they
+//! still carry a `seq` so clients can detect gaps without special-casing them.
 //!
 //! ```json
 //! {"type":"snapshot","seq":1042,"bids":[[10000,50],[9999,120]],"asks":[[10001,30],[10002,75]]}
@@ -52,9 +20,6 @@ use engine::{Event, OrderId, Price, RejectReason, Side, Snapshot};
 use serde::{Deserialize, Serialize};
 
 /// A single message on the `/ws` stream.
-///
-/// Internally tagged by `"type"`, so JSON is a flat object per variant (see
-/// module docs for examples).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Message {
@@ -97,11 +62,9 @@ pub enum Message {
 }
 
 impl Message {
-    /// Maps one engine event to its wire message. Total and injective:
-    /// every event becomes exactly one message, preserving `seq`.
-    ///
-    /// Trades are produced with `ts = 0`; the server stamps real time with
-    /// [`Message::with_timestamp`].
+    /// Maps one engine event to its wire message.
+    /// Trades are produced with `ts = 0`; stamp real time with
+    /// [`Message::with_timestamp`] before broadcasting.
     pub fn from_event(event: &Event) -> Self {
         match event {
             Event::Ack { seq, id } => Message::Ack { seq: *seq, id: *id },
@@ -136,13 +99,12 @@ impl Message {
         }
     }
 
-    /// Wraps a book snapshot as the `snapshot` bootstrap message.
+    /// Wraps a book snapshot as the bootstrap `snapshot` wire message.
     pub fn from_snapshot(snapshot: &Snapshot) -> Self {
         Message::Snapshot(snapshot.clone())
     }
 
-    /// Returns this message with `trade` timestamps set to `ts_ms`. A no-op
-    /// for every non-trade message.
+    /// Sets `ts` on a trade message; no-op for all other variants.
     pub fn with_timestamp(self, ts_ms: u64) -> Self {
         match self {
             Message::Trade {
@@ -175,18 +137,14 @@ impl Message {
         }
     }
 
-    /// `true` for trade messages (used by the server to route fills to the
-    /// persistence writer).
     pub fn is_trade(&self) -> bool {
         matches!(self, Message::Trade { .. })
     }
 
-    /// Serializes to a compact JSON string.
     pub fn encode(&self) -> String {
         serde_json::to_string(self).expect("Message is always serializable")
     }
 
-    /// Parses a JSON string produced by [`Message::encode`].
     pub fn decode(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }

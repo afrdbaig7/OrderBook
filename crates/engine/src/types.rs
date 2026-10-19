@@ -1,27 +1,16 @@
-//! Core value types for the matching engine.
-//!
-//! All financial values are integers. Floating point is never used for
-//! matching, so there is no rounding error in price or quantity comparisons.
+//! Core types for the matching engine. All prices and quantities are integers.
 
 use serde::{Deserialize, Serialize};
 
-/// Price in integer ticks.
-///
-/// A price of `0` is invalid and rejected by the engine (validation lives in
-/// `OrderBook`, Phase B).
+/// Price in integer ticks. A price of `0` is rejected by the engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Price(pub u64);
 
-/// Monotonic order identifier assigned by the feed/producer.
-///
-/// Identifiers must be unique among orders submitted to a book; duplicates are
-/// rejected.
+/// Order identifier. Must be unique among resting orders; duplicates are rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct OrderId(pub u64);
 
-/// Side of an order.
-///
-/// Serializes as `"bid"` / `"ask"` so the wire protocol needs no conversion.
+/// Bid or ask.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
 )]
@@ -33,7 +22,6 @@ pub enum Side {
 }
 
 impl Side {
-    /// The opposite side, used to find the opposing book for matching.
     #[inline]
     pub fn opposite(self) -> Side {
         match self {
@@ -43,7 +31,7 @@ impl Side {
     }
 }
 
-/// A limit order resting in (or crossing) the book.
+/// A limit order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Order {
     pub id: OrderId,
@@ -52,11 +40,7 @@ pub struct Order {
     pub qty: u64,
 }
 
-/// A single executed quantity transfer between a resting (maker) order and an
-/// incoming (taker) order.
-///
-/// **`price` is always the maker's resting price**, never the taker's limit
-/// price.
+/// One fill between a maker and taker. Price is always the maker's resting price.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fill {
     pub maker_id: OrderId,
@@ -66,8 +50,6 @@ pub struct Fill {
 }
 
 /// Why a request was rejected.
-///
-/// Serializes lowercase to match the JSON wire protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectReason {
@@ -79,21 +61,15 @@ pub enum RejectReason {
     DuplicateOrderId,
     #[error("unknown cancel")]
     UnknownCancel,
-    /// A market order's remainder was dropped because liquidity ran out.
-    /// The fills that *did* execute are emitted as `Fill` events before this.
+    /// Market order's remainder dropped after liquidity ran out.
     #[error("market order unfilled")]
     MarketUnfilled,
 }
 
-/// Externally visible engine events, in canonical order.
-///
-/// Every event carries a monotonically increasing `seq` assigned by the
-/// `OrderBook` (Phase B). Clients use `seq` to detect dropped messages and to
-/// order snapshot/delta reconstruction.
-///
-/// No serde derives here: the server layer explicitly maps these internal
-/// events to wire messages (`/ws` protocol), keeping the wire format out of
-/// the engine crate.
+/// Engine events. Every event carries a monotonically increasing `seq`.
+/// Clients use it to detect dropped messages. The server translates these
+/// to wire messages — no serde on internal events keeps the wire format
+/// out of this crate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Ack {
@@ -123,7 +99,6 @@ pub enum Event {
 }
 
 impl Event {
-    /// The global sequence number carried by every externally visible event.
     #[inline]
     pub fn seq(&self) -> u64 {
         match self {

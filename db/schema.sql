@@ -5,8 +5,8 @@
 
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
--- §34 — one row per executed trade. Integer prices/quantities; taker side is
--- an SMALLINT (0 = bid, 1 = ask). The table records *market data*, not a
+-- One row per executed trade. Integer prices/quantities; taker side is
+-- a SMALLINT (0 = bid, 1 = ask). The table records market data, not a
 -- ledger: no order identities are stored.
 CREATE TABLE IF NOT EXISTS trades (
     ts         TIMESTAMPTZ NOT NULL,          -- server receive time
@@ -21,7 +21,7 @@ SELECT create_hypertable('trades', 'ts', if_not_exists => TRUE);
 
 CREATE INDEX IF NOT EXISTS trades_seq_idx ON trades (seq);
 
--- §35 — 1-second OHLCV continuous aggregate. `first`/`last` are
+-- 1-second OHLCV continuous aggregate. `first`/`last` are
 -- TimescaleDB's sort-based aggregates; everything is cast back to bigint so
 -- the API layer reads plain integers.
 CREATE MATERIALIZED VIEW IF NOT EXISTS candles_1s

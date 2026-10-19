@@ -1,4 +1,4 @@
-//! Criterion benchmarks for the bare engine (Phase C baseline).
+//! Criterion benchmarks for the matching engine.
 //!
 //! Four workloads × three depth variants:
 //!

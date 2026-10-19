@@ -1,4 +1,4 @@
-//! Per-operation latency benchmark (Phase C).
+//! Per-operation engine latency benchmark.
 //!
 //! Measures engine-call latency with `hdrhistogram` over millions of
 //! operations and reports p50 / p99 / p99.9 / max, overall and per

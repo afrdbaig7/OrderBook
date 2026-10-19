@@ -1,4 +1,4 @@
-//! Phase A tests for `PriceLevel`.
+//! Unit tests for `PriceLevel`.
 //!
 //! Each test documents the correctness property it protects.
 
@@ -226,7 +226,7 @@ fn remove_last_order_empties_level() {
 }
 
 /// Property: removing an unknown id changes nothing (the OrderBook layer
-/// turns this into a `Reject` event in Phase B).
+/// turns this into a `Reject` event).
 #[test]
 fn remove_unknown_order_is_none_and_does_not_mutate() {
     let mut level = PriceLevel::new();

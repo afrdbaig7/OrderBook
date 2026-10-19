@@ -1,4 +1,4 @@
-//! Phase B unit tests for `OrderBook`.
+//! Unit tests for `OrderBook`.
 //!
 //! Each test documents the correctness property it protects.
 

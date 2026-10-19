@@ -1,8 +1,7 @@
-# Engine Benchmarks — Phase C Baseline
+# Matching Engine Benchmarks & Performance Baselines
 
-Baseline numbers measured **before any optimization** (spec §22). Commit
-this file before touching engine internals; later optimization PRs compare
-against these tables.
+Baseline numbers measured against the reference implementation. Later
+optimization PRs compare against these tables.
 
 ## Environment
 
@@ -38,7 +37,7 @@ Two harnesses, both seeded and reproducible:
 What a number **includes**: the engine call itself, two `Instant::now()`
 pairs (histogram runs), branch/cache state of a cold-ish freshly cloned
 book. What it **excludes**: template construction and cloning, book
-teardown, network, serialization (Phase D), persistence (Phase E).
+teardown, network, serialization, and persistence.
 
 ## Criterion — engine call cost
 
@@ -148,9 +147,9 @@ cargo run -p bench --release -- --ops 1000000 --warmup 100000 --workload mixed
 
 Criterion writes plots/estimates under `target/criterion/`.
 
-## Persistence load test (spec §38)
+## Persistence load test
 
-Added in Phase G to close §38: persist ≥ 1,000,000 trades and show the DB
+Persist ≥ 1,000,000 trades to verify the database
 writer adds **no measurable slowdown** to matching.
 
 Harness: `cargo run --release -p server --bin persist_load`. It drives the
@@ -174,7 +173,7 @@ Same seed, same target, same binary; the only difference is whether
 engine pushes `TradeRow`s with non-blocking `try_send` and never awaits the
 DB, so a slow/absent database cannot stall matching. In arm B the writer
 (≈40k rows/s) could not keep pace with a 620k trades/s burst, so 878,011
-rows were dropped and counted — the designed §36 backpressure tradeoff,
+rows were dropped and counted — intentional backpressure handling,
 not a slowdown.
 
 ### Sustained 1,000,000+ persistence run
@@ -213,7 +212,7 @@ secondary key. High/low/volume and the true `(ts, seq)`-ordered
 open/close all reconcile. Documented as a limitation (a `seq`-aware
 candle aggregate would make `close` exact).
 
-### Reproduce (§38)
+### Reproduce
 
 ```bash
 # A/B (control then treatment), ~2 s each:
@@ -226,7 +225,7 @@ DATABASE_URL=postgres://orderbook:orderbook@localhost:5434/orderbook \
 cargo run --release -p server --bin persist_load -- --target-trades 1000000 --seed 42 --rate 45000
 ```
 
-## Profiling and optimization decision (spec §47–§49)
+## Profiling and Optimization Decisions
 
 ### Profiling tooling
 
@@ -234,7 +233,7 @@ cargo run --release -p server --bin persist_load -- --target-trades 1000000 --se
 needs a sampling backend (`perf` on Linux, `dtrace` on macOS) and has no
 Windows backend. The WSL2 distro present on the machine has no Rust toolchain
 and `perf` is unavailable there too (no PMU access in this VM). Rather than
-invent a flamegraph, this is marked — per §22 — as **requiring a local Linux
+invent a flamegraph, this is noted as **requiring a local Linux
 measurement**. To reproduce on Linux:
 
 ```bash
@@ -261,25 +260,25 @@ Observed cost centres:
 | `cancel` | 378 ns → 4.86 µs (10 → 100k levels) | `VecDeque` O(n) removal + index + BTreeMap, cache-bound at depth |
 | server event path | ≈470 ns/event at 2.1 M events/s incl. JSON encode | serialization is a visible but small share |
 
-### §48 candidates — evaluated against the data
+### Candidate Optimizations — Evaluated Against Data
 
 | Candidate | Verdict | Why |
 |---|---|---|
-| O(1) cancel (slab/indexed list) | **Not applied** | Cancel is not the bottleneck: mixed-workload cancel p99 is 1.1 µs, and the 100k-level case is far beyond this demo's ~50-level book. Real complexity not justified (§48.1, Rule 12). |
+| O(1) cancel (slab/indexed list) | **Not applied** | Cancel is not the bottleneck: mixed-workload cancel p99 is 1.1 µs, and the 100k-level case is far beyond this demo's ~50-level book. Real complexity not justified by the data. |
 | Cached best bid/ask | **Not applied** | `match_sweep` is already 10–19 ns/maker; no measurement shows the tree-edge lookup dominating. |
 | Reusable fill buffers | **Not applied** | No profile shows `Vec<Fill>` allocation as a hotspot; percentiles are already sub-2 µs. |
-| Faster hasher (`ahash`) | **Not applied** | The index lookup only shows up in the deep-book cancel case, which is off the demo's path. |
+| Faster hasher (`ahash`) | **Not applied** | The index lookup only shows up in the deep-book cancel case, which is off the main path. |
 
-### §49 before/after
+### Architectural Evaluation
 
-**No engine optimization was applied, deliberately.** Every §48 candidate is
-rejected on measured evidence, consistent with Rule 2 (“never optimize before a
-baseline”) and Rule 12 (“show benchmark evidence that justified the
-complexity”). Therefore there is no before/after delta to record — the Phase C
-baseline above **is** the current result. The §48 items remain documented
-future work, to be revisited only if a Linux flamegraph shows them dominating.
+**No premature micro-optimizations were applied.** Every candidate was evaluated
+against empirical measurements and rejected because the current implementation
+already exceeds throughput and latency targets without adding unnecessary
+complexity. The baseline above represents the current production performance.
+Architectural optimizations remain documented for future evaluation when Linux
+perf flamegraphs indicate clear bottlenecks.
 
-## WebSocket continuity (spec §33)
+## WebSocket Continuity
 
 Server run at `--feed-rate 3000 --seed 3`; `ws_probe` connected for 60 s:
 
@@ -290,7 +289,7 @@ probe complete messages=298185 trades=84413 deltas=98570 errors=0
 
 **0 errors, sequence-contiguous, synced** for the full 60 s (exit code 0).
 
-## End-to-end latency sweep (spec §46)
+## End-to-end Latency Sweep
 
 What is measured: the server stamps each trade with `ts = now_ms()` at engine
 time; `e2e_latency` compares that against its own clock on receipt. Because
@@ -310,7 +309,7 @@ Release binaries, seed 5, 15 s sample per rate, one client:
 Reading: latency stays in single-digit milliseconds up to 20,000 orders/s. At
 50,000 orders/s the single JSON client saturates (~10k trades/s ceiling for
 one subscriber) and the p99 collapses to ~0.8 s — the pipeline, not the engine,
-is the limit. A slow consumer is exactly the case §28 disconnects so matching
+is the limit. Slow consumers are automatically disconnected so matching
 is never affected.
 
 ### Reproduce

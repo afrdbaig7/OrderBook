@@ -1,13 +1,8 @@
 //! Reference client-side book reconstruction.
 //!
-//! Mirrors exactly what a browser must do with the `/ws` stream: start from
-//! a `snapshot`, then apply `delta`s in strict `seq` order. `trade`, `ack`,
-//! `cancel` and `reject` do not change the book but advance `seq`, so they
-//! matter for gap detection.
-//!
-//! This type is the executable specification of the client protocol and is
-//! reused by the Phase D tests; the JavaScript client will implement the
-//! same rules.
+//! Mirrors what a browser must do: bootstrap from a `snapshot`, then apply
+//! `delta`s in strict `seq` order. Non-book messages (`trade`, `ack`, etc.)
+//! still advance `seq` for gap detection purposes.
 
 use std::collections::BTreeMap;
 
@@ -26,7 +21,6 @@ pub struct ClientBook {
 }
 
 impl ClientBook {
-    /// A fresh, unsynced client. Feed it a `snapshot` first.
     pub fn new() -> Self {
         Self::default()
     }
@@ -80,7 +74,6 @@ impl ClientBook {
         self.last_seq = seq;
     }
 
-    /// Decodes a JSON message and applies it.
     pub fn apply_json(&mut self, json: &str) -> Result<(), serde_json::Error> {
         let message = Message::decode(json)?;
         self.apply(&message);
@@ -94,27 +87,22 @@ impl ClientBook {
         }
     }
 
-    /// Resting bids, price → total qty.
     pub fn bids(&self) -> &BTreeMap<Price, u64> {
         &self.bids
     }
 
-    /// Resting asks, price → total qty.
     pub fn asks(&self) -> &BTreeMap<Price, u64> {
         &self.asks
     }
 
-    /// Highest applied sequence number.
     pub fn last_seq(&self) -> u64 {
         self.last_seq
     }
 
-    /// `true` once a snapshot has been applied.
     pub fn is_synced(&self) -> bool {
         self.synced
     }
 
-    /// `true` if a sequence gap was detected and a resync is required.
     pub fn is_desynced(&self) -> bool {
         self.desynced
     }

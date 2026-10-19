@@ -1,50 +1,12 @@
-//! `OrderBook` — deterministic price-time priority matching.
+//! Limit order book matching engine (price-time priority).
 //!
-//! # Why single-writer
+//! Single-threaded: the engine thread owns the book exclusively.
+//! Bids and asks are stored in `BTreeMap`s for logarithmic best-price queries
+//! and ordered traversal. An order index (`HashMap<OrderId, (Side, Price)>`)
+//! enables direct O(1) level lookup on cancellation.
 //!
-//! Exactly one thread owns this struct and may call `&mut self` methods.
-//! Because there is no shared ownership, the hot path needs **no `Mutex`,
-//! no `RwLock`, no atomics** — the compiler's borrow checker proves the
-//! absence of data races instead of a lock proving it at runtime. It also
-//! makes behaviour deterministic: one book, one sequence of mutations, one
-//! canonical event order.
-//!
-//! # Why `BTreeMap` is reasonable here
-//!
-//! The book needs "the best opposing price" constantly:
-//!
-//! * bids: **maximum** price → `keys().next_back()`
-//! * asks: **minimum** price → `keys().next()`
-//!
-//! A `BTreeMap` gives ordered iteration, O(log n) insert/remove and cheap
-//! edge lookups, with no unsafe code and predictable memory behaviour. A
-//! skip list or an array-based ladder could be faster — that is a *measurement*
-//! question for Phase C/G, not an assumption. Correctness first.
-//!
-//! # Why an order index exists
-//!
-//! Without it, `cancel(id)` would be O(total orders in book): scan every
-//! level of both sides. The index maps `OrderId -> (Side, Price)` so cancel
-//! descends directly to one level, then removes in O(level depth). The index
-//! also *defines* what "resting" means: an order is in the index iff it sits
-//! in a level (invariant 3, property-tested).
-//!
-//! # Sequencing
-//!
-//! Only this struct assigns `seq`. Every emitted event — including
-//! rejects — consumes exactly one number, so external observers share one
-//! gap-detectable total order. Nothing downstream (feed, WebSocket, DB) may
-//! assign or renumber events.
-//!
-//! # Complexity (v1)
-//!
-//! | Operation              | Cost                     |
-//! |------------------------|--------------------------|
-//! | rest (no cross)        | O(log P)                 |
-//! | match                  | O(log P + k)             |
-//! | cancel                 | O(log P + L)             |
-//!
-//! where P = price levels, k = makers consumed, L = orders in that level.
+//! All state transitions emit strictly sequenced events (`seq` increments by 1
+//! per event, including rejects and cancels).
 
 use std::collections::{BTreeMap, HashMap};
 
