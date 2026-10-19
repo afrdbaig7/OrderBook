@@ -1,4 +1,4 @@
-//! Phase E gate: persistence against a live TimescaleDB.
+//! Integration test: persistence against a live TimescaleDB.
 //!
 //! Requires a reachable database, supplied via `TEST_DATABASE_URL`
 //! (e.g. `postgres://orderbook:orderbook@localhost:5432/orderbook`, which
@@ -64,7 +64,7 @@ fn now_ms() -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn phase_e_gate_persists_trades_and_candles() {
+async fn persists_trades_and_candles() {
     let Some(url) = database_url() else {
         eprintln!("TEST_DATABASE_URL unset — skipping persistence gate");
         return;
@@ -153,9 +153,167 @@ async fn phase_e_gate_persists_trades_and_candles() {
     .await
     .expect("get /candles");
     assert!(body.contains("200 OK"), "{body}");
-    println!(
-        "phase_e: sample candles response: {}",
-        &body[..body.len().min(400)]
+    println!("sample candles response: {}", &body[..body.len().min(400)]);
+
+    // ── Dedicated Database-Backed Candle Boundary Semantics ─────────────
+    // Assert returned timestamps follow [from, to): include from, exclude to,
+    // and handle empty and maximum-length windows correctly.
+    let json_str = body.split("\r\n\r\n").nth(1).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(json_str).expect("parse json");
+    let candle_list = parsed["candles"].as_array().expect("candles array");
+    assert!(
+        candle_list.len() >= 2,
+        "expected at least 2 candle bars for boundary validation, got {}",
+        candle_list.len()
+    );
+
+    let t0 = candle_list[0]["ts"].as_i64().expect("t0");
+    let t1 = candle_list[1]["ts"].as_i64().expect("t1");
+    assert!(
+        t1 > t0,
+        "consecutive candles should have increasing timestamps"
+    );
+
+    // 1. Exact half-open [t0, t1): must include t0 and exclude t1
+    let resp = http_request(
+        port,
+        "GET",
+        &format!("/candles?from={t0}&to={t1}&interval=1s"),
+        "",
+    )
+    .await
+    .unwrap();
+    assert!(resp.contains("200 OK"), "{resp}");
+    let b_json: serde_json::Value =
+        serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let b_candles = b_json["candles"].as_array().unwrap();
+    assert_eq!(b_candles.len(), 1, "expected exactly 1 candle in [t0, t1)");
+    assert_eq!(
+        b_candles[0]["ts"].as_i64(),
+        Some(t0),
+        "must include lower bound t0 and exclude upper bound t1"
+    );
+
+    // 2. Exact half-open [t1, t1 + 1000): must include t1 and exclude t0
+    let resp = http_request(
+        port,
+        "GET",
+        &format!("/candles?from={t1}&to={}&interval=1s", t1 + 1000),
+        "",
+    )
+    .await
+    .unwrap();
+    assert!(resp.contains("200 OK"), "{resp}");
+    let b_json: serde_json::Value =
+        serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let b_candles = b_json["candles"].as_array().unwrap();
+    assert_eq!(
+        b_candles.len(),
+        1,
+        "expected exactly 1 candle in [t1, t1 + 1000)"
+    );
+    assert_eq!(
+        b_candles[0]["ts"].as_i64(),
+        Some(t1),
+        "must include lower bound t1 and exclude prior bucket t0"
+    );
+
+    // 3. Empty window: [t0, t0): must return 200 OK with empty candles array
+    let resp = http_request(
+        port,
+        "GET",
+        &format!("/candles?from={t0}&to={t0}&interval=1s"),
+        "",
+    )
+    .await
+    .unwrap();
+    assert!(resp.contains("200 OK"), "{resp}");
+    let b_json: serde_json::Value =
+        serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let b_candles = b_json["candles"].as_array().unwrap();
+    assert!(
+        b_candles.is_empty(),
+        "empty window [t0, t0) must return 0 candles"
+    );
+
+    // 4. Maximum-length window: exactly 86_400_000 ms (24 hours)
+    let max_from = to - 86_400_000;
+    let resp = http_request(
+        port,
+        "GET",
+        &format!("/candles?from={max_from}&to={to}&interval=1s"),
+        "",
+    )
+    .await
+    .unwrap();
+    assert!(
+        resp.contains("200 OK"),
+        "24h maximum boundary window must return 200 OK: {resp}"
+    );
+
+    // 5. Exceeding maximum-length window: 86_400_001 ms (24h + 1ms)
+    let over_from = to - 86_400_001;
+    let resp = http_request(
+        port,
+        "GET",
+        &format!("/candles?from={over_from}&to={to}&interval=1s"),
+        "",
+    )
+    .await
+    .unwrap();
+    assert!(
+        resp.contains("400 Bad Request"),
+        "over-24h window must return 400 Bad Request: {resp}"
+    );
+
+    // ── Focused Verification: Elapsed-Time Deadline Flush Contract ──────
+    // Stop feed so no new trades are arriving and allow pending queue to commit
+    let resp = http_request(port, "POST", "/feed-rate", "{\"orders_per_second\":0}")
+        .await
+        .unwrap();
+    assert!(resp.contains("200 OK"));
+    tokio::time::sleep(Duration::from_millis(350)).await;
+
+    let health_before = http_request(port, "GET", "/health", "").await.unwrap();
+    let json_before: serde_json::Value =
+        serde_json::from_str(health_before.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let trades_before = json_before["trades"].as_u64().unwrap();
+    let persisted_before = json_before["persisted_rows"].as_u64().unwrap();
+    assert_eq!(
+        trades_before, persisted_before,
+        "prior trades must be fully flushed before deadline test"
+    );
+
+    // Turn feed on briefly at 500 orders/sec to generate a partial batch (<< 1,000)
+    let _ = http_request(port, "POST", "/feed-rate", "{\"orders_per_second\":500}")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Halt feed again
+    let _ = http_request(port, "POST", "/feed-rate", "{\"orders_per_second\":0}")
+        .await
+        .unwrap();
+
+    let health_mid = http_request(port, "GET", "/health", "").await.unwrap();
+    let json_mid: serde_json::Value =
+        serde_json::from_str(health_mid.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let new_trades = json_mid["trades"].as_u64().unwrap() - trades_before;
+    assert!(
+        new_trades > 0 && new_trades < 1000,
+        "expected partial batch (< 1000 rows), got {new_trades}"
+    );
+
+    // Allow the 100ms elapsed-time flush deadline to expire and commit
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let health_after = http_request(port, "GET", "/health", "").await.unwrap();
+    let json_after: serde_json::Value =
+        serde_json::from_str(health_after.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let persisted_after = json_after["persisted_rows"].as_u64().unwrap();
+    assert_eq!(
+        persisted_after - persisted_before,
+        new_trades,
+        "elapsed-time deadline (100ms) must flush partial batch without waiting for BATCH_ROWS (1000)"
     );
 
     child.kill().await.expect("kill server");

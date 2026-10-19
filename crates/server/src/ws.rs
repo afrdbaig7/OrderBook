@@ -1,21 +1,10 @@
-//! WebSocket handler: snapshot-then-deltas, with lag handling (spec §5, §28).
+//! WebSocket handler: snapshot bootstrap then live delta streaming.
 //!
-//! # Handshake
-//!
-//! 1. Subscribe to the broadcast channel **before** requesting the snapshot,
-//!    so no delta published after the snapshot can be missed.
-//! 2. Send a `snapshot` request to the engine thread and wait for the reply.
-//! 3. Send the snapshot, then stream live messages, dropping any with
-//!    `seq <= snapshot.seq` (those are duplicates already reflected in the
-//!    snapshot).
-//!
-//! # Backpressure
-//!
-//! A Tokio `broadcast` receiver that falls behind by more than its capacity
-//! yields `RecvError::Lagged`. Rather than silently skipping deltas (which
-//! would corrupt the client's book), we log the gap and **close the socket**.
-//! A well-behaved client reconnects and gets a fresh snapshot — the same
-//! recovery rule the `feed` crate's `ClientBook` implements.
+//! On connect: subscribe to the broadcast channel *first* (so no delta can
+//! race past the snapshot), request a consistent snapshot from the engine
+//! thread, send it, then stream live messages skipping those already covered
+//! by the snapshot. Lagging clients are closed so they reconnect for a fresh
+//! snapshot rather than silently receiving a corrupted book.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,10 +111,7 @@ async fn run(mut socket: WebSocket, state: AppState) {
 }
 
 /// Sends a command to the engine, retrying briefly if the channel is full.
-///
-/// Snapshot requests are rare; a short backoff avoids ever blocking the
-/// async runtime on a synchronous channel. `try_send` returns the command
-/// when the channel is full, so we re-own it and retry.
+/// Short backoff avoids blocking the async runtime on a synchronous channel.
 async fn send_with_backoff(state: &AppState, mut command: EngineCommand) -> bool {
     for attempt in 0..10u32 {
         match state.cmd_tx.try_send(command) {

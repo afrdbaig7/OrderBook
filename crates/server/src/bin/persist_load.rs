@@ -1,13 +1,12 @@
-//! §38 load generator: drives the **real** engine thread and the **real**
-//! batched persistence writer (no server, no WebSocket, no feed pacing) so we
-//! can
+//! Load generator: drives the engine thread and the
+//! batched persistence writer (standalone, without HTTP/WebSocket) to:
 //!
 //! 1. persist ≥ `--target-trades` fills into TimescaleDB, and
-//! 2. A/B the engine hot path with persistence **on** vs **off** to show the
-//!    DB writer adds no measurable slowdown to matching (spec §38).
+//! 2. benchmark the engine hot path with persistence **on** vs **off** to verify
+//!    the DB writer adds no measurable latency overhead to matching.
 //!
-//! It uses the same `feed::SyntheticFeed` and `engine_thread::spawn` the
-//! server does, so the work measured is genuine. Run it twice with the same
+//! Uses the same `feed::SyntheticFeed` and `engine_thread::spawn` the
+//! server does, so the benchmark is realistic. Run it twice with the same
 //! seed for a fair comparison:
 //!
 //! ```text
@@ -34,7 +33,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser, Debug)]
 #[command(
     name = "persist_load",
-    about = "Load generator for persistence throughput (spec §38)"
+    about = "Load generator for database persistence throughput"
 )]
 struct Args {
     /// Target number of fills (trades) to generate before stopping.

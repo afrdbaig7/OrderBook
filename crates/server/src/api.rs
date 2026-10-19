@@ -1,4 +1,4 @@
-//! HTTP endpoints: `/health`, `/candles`, `/feed-rate` (spec §5, §31, §35).
+//! HTTP endpoints: `/health`, `/candles`, and `/feed-rate`.
 
 use std::sync::atomic::Ordering;
 
@@ -38,11 +38,13 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 /// Query string for `GET /candles`.
+///
+/// Semantics: half-open interval `[from, to)` (start inclusive, end exclusive).
 #[derive(Deserialize)]
 pub struct CandlesQuery {
-    /// Window start, epoch milliseconds.
+    /// Window start, epoch milliseconds (inclusive).
     pub from: i64,
-    /// Window end, epoch milliseconds.
+    /// Window end, epoch milliseconds (exclusive: `[from, to)`).
     pub to: i64,
     /// Only `"1s"` is supported; anything else is a `400`.
     #[serde(default = "default_interval")]
@@ -71,7 +73,13 @@ pub struct CandlesResponse {
     pub candles: Vec<Candle>,
 }
 
-/// Reads 1-second candles from the TimescaleDB continuous aggregate.
+/// Maximum allowed feed rate in orders/second to prevent unbounded resource consumption.
+pub const MAX_FEED_RATE: u64 = 100_000;
+
+/// Maximum allowed candle query range in milliseconds (24 hours of 1-second candles = 86,400 bars).
+pub const MAX_CANDLE_RANGE_MS: i64 = 86_400 * 1_000;
+
+/// Reads 1-second candles from the TimescaleDB continuous aggregate over `[from, to)`.
 const CANDLES_SQL: &str = "\
 SELECT (extract(epoch FROM bucket) * 1000)::bigint AS ts,
        open::bigint   AS open,
@@ -81,8 +89,9 @@ SELECT (extract(epoch FROM bucket) * 1000)::bigint AS ts,
        volume::bigint AS volume
 FROM candles_1s
 WHERE bucket >= to_timestamp($1 / 1000.0)
-  AND bucket <= to_timestamp($2 / 1000.0)
-ORDER BY bucket";
+  AND bucket < to_timestamp($2 / 1000.0)
+ORDER BY bucket
+LIMIT 86400";
 
 /// `GET /candles?from=<ms>&to=<ms>&interval=1s`.
 pub async fn candles(
@@ -98,10 +107,26 @@ pub async fn candles(
             ),
         ));
     }
+    if query.from < 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "'from' must be greater than or equal to 0".to_string(),
+        ));
+    }
     if query.to < query.from {
         return Err((
             StatusCode::BAD_REQUEST,
             "'to' must be greater than or equal to 'from'".to_string(),
+        ));
+    }
+    if query.to - query.from > MAX_CANDLE_RANGE_MS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "candle query range ({} ms) exceeds maximum allowed range of {} ms (24 hours)",
+                query.to - query.from,
+                MAX_CANDLE_RANGE_MS
+            ),
         ));
     }
     let guard = state.persistence.read().await;
@@ -157,13 +182,23 @@ pub struct SetFeedRate {
 pub async fn set_feed_rate(
     State(state): State<AppState>,
     Json(body): Json<SetFeedRate>,
-) -> Json<FeedRateResponse> {
+) -> Result<Json<FeedRateResponse>, (StatusCode, String)> {
+    if body.orders_per_second > MAX_FEED_RATE {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "feed rate {} exceeds maximum allowed value of {} orders/second",
+                body.orders_per_second, MAX_FEED_RATE
+            ),
+        ));
+    }
+
     state
         .feed_rate
         .store(body.orders_per_second, Ordering::Relaxed);
-    Json(FeedRateResponse {
+    Ok(Json(FeedRateResponse {
         orders_per_second: body.orders_per_second,
-    })
+    }))
 }
 
 #[derive(Serialize)]

@@ -1,7 +1,7 @@
 //! End-to-end integration test: spawns the real `server` binary with no
 //! database and drives it over real HTTP/WebSocket sockets.
 //!
-//! Verifies the Phase D gate on a live process:
+//! Verifies end-to-end integration on a live process:
 //!
 //! * `/health` comes up;
 //! * a WebSocket client gets a `snapshot` then a *contiguous* `seq` stream
@@ -141,7 +141,7 @@ async fn assert_continuous_stream(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn phase_d_gate_live_process() {
+async fn live_server_stream() {
     let port = free_port().await;
     let bin = env!("CARGO_BIN_EXE_server");
 
@@ -170,7 +170,7 @@ async fn phase_d_gate_live_process() {
     let mut book2 = ClientBook::new();
     assert_continuous_stream(port, &mut book2, 1000, false).await;
 
-    // 3. Live rate control.
+    // 3. Live rate control & bounds validation.
     let post = http_request(port, "POST", "/feed-rate", r#"{"orders_per_second":3000}"#)
         .await
         .expect("post /feed-rate");
@@ -181,13 +181,67 @@ async fn phase_d_gate_live_process() {
         .expect("get /feed-rate");
     assert!(get.contains("\"orders_per_second\":3000"), "{get}");
 
-    // 4. Candles correctly unavailable without a database.
-    let candles = http_request(port, "GET", "/candles?from=1&to=2&interval=1s", "")
+    // Reject excessive feed rate.
+    let post_overflow = http_request(
+        port,
+        "POST",
+        "/feed-rate",
+        r#"{"orders_per_second":100001}"#,
+    )
+    .await
+    .expect("post /feed-rate overflow");
+    assert!(post_overflow.contains("400 Bad Request"), "{post_overflow}");
+
+    // 4. Candles query validation and persistence availability.
+    // Invalid interval
+    let bad_interval = http_request(port, "GET", "/candles?from=1&to=2&interval=5s", "")
+        .await
+        .expect("get /candles bad interval");
+    assert!(bad_interval.contains("400 Bad Request"), "{bad_interval}");
+
+    // Negative 'from'
+    let negative_from = http_request(port, "GET", "/candles?from=-1&to=1000&interval=1s", "")
+        .await
+        .expect("get /candles negative from");
+    assert!(negative_from.contains("400 Bad Request"), "{negative_from}");
+
+    // 'to' before 'from'
+    let inverted_range = http_request(port, "GET", "/candles?from=2000&to=1000&interval=1s", "")
+        .await
+        .expect("get /candles inverted");
+    assert!(
+        inverted_range.contains("400 Bad Request"),
+        "{inverted_range}"
+    );
+
+    // Exceeding max range (24h = 86_400_000 ms) by 1 ms returns 400.
+    let excessive_range = http_request(port, "GET", "/candles?from=0&to=86400001&interval=1s", "")
+        .await
+        .expect("get /candles excessive range");
+    assert!(
+        excessive_range.contains("400 Bad Request"),
+        "{excessive_range}"
+    );
+
+    // Exact 24-hour boundary [0, 86400000) is valid (passes validation, returns 503 without DB).
+    let max_valid_range = http_request(port, "GET", "/candles?from=0&to=86400000&interval=1s", "")
+        .await
+        .expect("get /candles max valid range");
+    assert!(max_valid_range.contains("503"), "{max_valid_range}");
+
+    // Empty half-open window [1000, 1000) is valid (passes validation, returns 503 without DB).
+    let empty_window = http_request(port, "GET", "/candles?from=1000&to=1000&interval=1s", "")
+        .await
+        .expect("get /candles empty window");
+    assert!(empty_window.contains("503"), "{empty_window}");
+
+    // Standard valid range correctly reports 503 unavailable when persistence is disabled.
+    let candles = http_request(port, "GET", "/candles?from=1000&to=2000&interval=1s", "")
         .await
         .expect("get /candles");
     assert!(candles.contains("503"), "{candles}");
 
-    // 5. Health reports the new rate.
+    // 5. Health reports the rate.
     let health = http_request(port, "GET", "/health", "")
         .await
         .expect("get /health");

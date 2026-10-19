@@ -230,7 +230,7 @@ async fn feed_task(
     info!("feed task stopped");
 }
 
-/// Logs a one-line metrics summary every second (spec §31).
+/// Logs a one-line metrics summary every second.
 async fn metrics_task(
     metrics: Arc<Metrics>,
     cmd_tx: Sender<EngineCommand>,

@@ -2,8 +2,8 @@
 //! testing (the standalone `websocat` replacement).
 //!
 //! Connects to `/ws`, applies every message through the reference
-//! [`ClientBook`], and exits nonzero if the stream desynchronizes. Useful for
-//! the Phase D gate: snapshot → contiguous deltas → emulated reconnect.
+//! [`ClientBook`], and exits nonzero if the stream desynchronizes:
+//! snapshot → contiguous deltas → reconnect handling.
 
 use std::time::{Duration, Instant};
 

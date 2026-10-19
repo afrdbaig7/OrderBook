@@ -1,24 +1,9 @@
-//! The dedicated engine thread: the **only** place an `OrderBook` is mutated.
+//! The dedicated engine thread — the only place the order book is mutated.
 //!
-//! # Why a dedicated thread (spec §5, §24)
-//!
-//! The book is owned by exactly one OS thread and reached through a bounded
-//! `crossbeam-channel`. That gives three properties a shared book cannot:
-//!
-//! * **No locks on the hot path** — the borrow checker, not a `Mutex`,
-//!   guarantees single ownership.
-//! * **Determinism** — one total order of commands ⇒ one canonical event
-//!   order. Snapshots and deltas therefore line up by construction.
-//! * **Isolation** — the thread knows nothing about Tokio, WebSockets, SQL
-//!   or HTTP. It receives `Command`s and emits serialized messages.
-//!
-//! # Snapshot consistency
-//!
-//! Snapshot requests travel on the *same* channel as feed commands, so they
-//! are ordered with respect to every mutation. A snapshot taken between two
-//! commands carries `seq = book.seq()`, and the very next broadcast message
-//! has `seq + 1`. A client only has to drop buffered messages with
-//! `seq <= snapshot.seq` (see crate `feed` client rules).
+//! The book is owned by a single OS thread reached via a bounded
+//! `crossbeam-channel`. No locks on the hot path; the borrow checker
+//! guarantees exclusive ownership. Snapshot requests travel on the same
+//! channel as feed commands so they're consistent by construction.
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -32,8 +17,8 @@ use tracing::warn;
 
 use crate::metrics::Metrics;
 
-/// A fill destined for the `trades` table. Deliberately id-free to match
-/// the schema (spec §34): persistence stores prices, not order identities.
+/// A fill destined for the `trades` table.
+/// Schema stores prices, not order ids, so there's no `id` field here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TradeRow {
     pub ts_ms: i64,
@@ -69,7 +54,7 @@ pub enum EngineCommand {
         depth: usize,
         respond: oneshot::Sender<SnapshotReply>,
     },
-    /// Stop the thread (graceful shutdown).
+    /// Stop the thread cleanly.
     Shutdown,
 }
 
@@ -121,9 +106,8 @@ pub fn spawn(
                             if let Some(row) = &trade {
                                 metrics.inc_trades();
                                 if let Some(tx) = &db_tx {
-                                    // Bounded, non-blocking: if the writer is
-                                    // behind, the trade is dropped and counted
-                                    // (spec §36). Matching never waits on the DB.
+                                    // behind, the trade is dropped and counted.
+                                    // Matching never waits on the DB.
                                     if tx.try_send(row.clone()).is_err() {
                                         metrics.add_persistence_drops(1);
                                     }

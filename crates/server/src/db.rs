@@ -1,4 +1,4 @@
-//! Batched TimescaleDB persistence for `trades` (spec §36).
+//! Batched TimescaleDB persistence for executed trades.
 //!
 //! # Design
 //!
@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, RecvTimeoutError};
+use crossbeam_channel::Receiver;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::sync::watch;
@@ -60,10 +60,11 @@ pub async fn run(
     *persistence.write().await = Some(pool.clone());
 
     let mut batch: Vec<TradeRow> = Vec::with_capacity(BATCH_ROWS);
+    let mut flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
     loop {
         // On shutdown, keep draining the channel until the engine drops its
         // sender rather than returning immediately: rows already queued are
-        // committed, not silently lost (spec §32 — avoid data loss on exit).
+        // committed, not silently lost on process exit.
         if *shutdown.borrow() {
             while let Ok(row) = rx.try_recv() {
                 batch.push(row);
@@ -76,19 +77,59 @@ pub async fn run(
             return;
         }
 
-        match rx.recv_timeout(FLUSH_INTERVAL) {
+        // Flush if the elapsed time deadline expired while holding buffered rows
+        let now = tokio::time::Instant::now();
+        if !batch.is_empty() && now >= flush_deadline {
+            flush(&pool, &mut batch, &metrics).await;
+            flush_deadline = now + FLUSH_INTERVAL;
+        }
+
+        match rx.try_recv() {
             Ok(row) => {
+                if batch.is_empty() {
+                    flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
+                }
                 batch.push(row);
-                if batch.len() >= BATCH_ROWS {
+                if batch.len() >= BATCH_ROWS || tokio::time::Instant::now() >= flush_deadline {
                     flush(&pool, &mut batch, &metrics).await;
+                    flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
+                } else if batch.len().is_multiple_of(100) {
+                    tokio::task::yield_now().await;
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {
-                if !batch.is_empty() {
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                let now = tokio::time::Instant::now();
+                if !batch.is_empty() && now >= flush_deadline {
                     flush(&pool, &mut batch, &metrics).await;
+                    flush_deadline = now + FLUSH_INTERVAL;
+                }
+
+                let sleep_duration = if batch.is_empty() {
+                    Duration::from_millis(10)
+                } else if now >= flush_deadline {
+                    Duration::from_millis(0)
+                } else {
+                    flush_deadline.saturating_duration_since(now)
+                };
+
+                if sleep_duration.is_zero() {
+                    if !batch.is_empty() {
+                        flush(&pool, &mut batch, &metrics).await;
+                        flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
+                    }
+                } else {
+                    tokio::select! {
+                        _ = tokio::time::sleep(sleep_duration) => {
+                            if !batch.is_empty() && tokio::time::Instant::now() >= flush_deadline {
+                                flush(&pool, &mut batch, &metrics).await;
+                                flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
+                            }
+                        }
+                        _ = shutdown.changed() => {}
+                    }
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
                 // Engine thread dropped its sender (shutdown or exit).
                 flush(&pool, &mut batch, &metrics).await;
                 info!("persistence: channel closed; flushed and stopped");

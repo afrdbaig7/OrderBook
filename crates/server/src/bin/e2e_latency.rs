@@ -1,4 +1,4 @@
-//! `e2e_latency` — end-to-end latency of the running system (Phase G gate).
+//! `e2e_latency` — end-to-end latency benchmark of the running system.
 //!
 //! Connects to `/ws`, and for every `trade` message compares the server-side
 //! `ts` stamp against the local clock on receipt. Because the server stamps
