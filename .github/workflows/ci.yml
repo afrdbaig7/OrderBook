@@ -68,11 +68,15 @@ jobs:
       - run: npm run build
 
   compose:
-    name: Docker Compose (config check)
+    name: Docker Compose (quickstart smoke test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate full-stack Compose configuration
-        run: docker compose config
-      - name: Validate development override Compose configuration
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config
+      - name: Validate Compose configuration
+        run: |
+          docker compose config
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config
+      - name: Run container quickstart smoke test
+        run: |
+          chmod +x scripts/smoke_test.sh
+          ./scripts/smoke_test.sh

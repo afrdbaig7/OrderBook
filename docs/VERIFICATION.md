@@ -112,16 +112,16 @@ Visual and interactive validation was conducted in headless Google Chrome at `14
 ```bash
 cargo test --workspace --locked
 ```
-Across all workspace crates, the test suite executes **66 passing tests** (0 failed):
+Across all workspace crates, the test suite executes **71 passing tests** (0 failed):
 * **`engine::order_book`:** 25 passed; 0 failed (FIFO execution, price-time priority, cancel handling, duplicate order ID rejection; see [`crates/engine/src/book.rs`](../crates/engine/src/book.rs)).
 * **`engine::price_level`:** 13 passed; 0 failed (`VecDeque` FIFO queue operations, partial fills, order removal; see [`crates/engine/src/price_level.rs`](../crates/engine/src/price_level.rs)).
 * **`engine::properties` (`proptest`):** 1 passed (10,000 randomized multi-operation sequences checking book invariants against `proptest_config(cases: 10_000)`; see [`crates/engine/tests/properties.rs`](../crates/engine/tests/properties.rs)).
-* **`engine::bounds`:** 6 passed; 0 failed (numeric overflow prevention, `MAX_SAFE_INTEGER` bounds, level aggregate quantity limits; see [`crates/engine/tests/bounds.rs`](../crates/engine/tests/bounds.rs)).
+* **`engine::bounds`:** 8 passed; 0 failed (numeric overflow prevention, `MAX_SAFE_INTEGER` bounds, `MAX_ORDER_ID` rejection, and `MAX_BOOK_LEVELS_PER_SIDE` depth limit; see [`crates/engine/tests/bounds.rs`](../crates/engine/tests/bounds.rs)).
 * **`engine::reference` (`proptest`):** 1 passed (1,000 cases comparing randomized sequences against an independent naive reference matcher; see [`crates/engine/tests/reference.rs`](../crates/engine/tests/reference.rs)).
 * **`feed::protocol`:** 4 passed; 0 failed (gap detection, snapshot resync, client state recovery; see [`crates/feed/src/protocol.rs`](../crates/feed/src/protocol.rs)).
-* **`feed::reconstruct`:** 6 passed; 0 failed (JSON wire pipeline reconstruction, deep book snapshot reconstruction regression test, and candidate pool memory soak test; see [`crates/feed/tests/reconstruct.rs`](../crates/feed/tests/reconstruct.rs)).
+* **`feed::reconstruct`:** 7 passed; 0 failed (JSON wire pipeline reconstruction, deep book snapshot reconstruction regression test, client-depth-equals-engine-depth boundary test, and candidate pool memory soak test; see [`crates/feed/tests/reconstruct.rs`](../crates/feed/tests/reconstruct.rs)).
 * **`feed::wire`:** 7 passed; 0 failed (schema validation, roundtrip serialization; see [`crates/feed/src/wire.rs`](../crates/feed/src/wire.rs)).
-* **`server::e2e`:** 2 passed; 0 failed (live server streaming, rate limiting bounds, 24h candle limits, and slow-client eviction with reconnection recovery; see [`crates/server/tests/e2e.rs`](../crates/server/tests/e2e.rs)).
+* **`server::e2e`:** 4 passed; 0 failed (live server streaming, CLI startup validation, whole-server process shutdown with active clients, and slow-client eviction with reconnection recovery; see [`crates/server/tests/e2e.rs`](../crates/server/tests/e2e.rs)).
 * **`server::shutdown`:** 1 passed; 0 failed (strictly ordered shutdown with slow writer and queued engine commands; see [`crates/server/tests/shutdown.rs`](../crates/server/tests/shutdown.rs)).
 * **`server::persistence`:** 2 passed; 0 failed (deterministic same-millisecond candle ordering tie-break by sequence, and partial-batch flush timer; see [`crates/server/tests/persistence.rs`](../crates/server/tests/persistence.rs)). When run without `TEST_DATABASE_URL` (e.g. in CI without Docker), this test suite skips database queries, allowing offline workspace tests to stay green. Active database assertions are verified via dedicated live execution (see §5.2).
 
@@ -135,18 +135,30 @@ Executed with `TEST_DATABASE_URL=postgres://orderbook:orderbook@localhost:5434/o
 * **Exceeding 24h Window:** Asserts interval of 86,400,001 ms returns HTTP 400 Bad Request.
 * **Partial-Batch Flush Contract:** Halts feed, injects a partial burst of trades ($< 1,000$ rows), waits for the elapsed-time flush window, and asserts `persisted_rows` increments by the exact count without waiting for a full 1,000-row batch. (Note: this integration test demonstrates that sub-1,000-row batches flush automatically via the elapsed timer rather than waiting indefinitely for `BATCH_ROWS`; due to test sleep margins, it demonstrates eventual elapsed flushing rather than an exact hard real-time sub-millisecond 100 ms precision guarantee).
 
-### 5.3 Code Quality & Linters
+### 5.3 Automated Container Quickstart Smoke Test
+Automated end-to-end container testing is provided via executable test scripts:
+* **POSIX:** [`scripts/smoke_test.sh`](../scripts/smoke_test.sh)
+* **PowerShell:** [`scripts/smoke_test.ps1`](../scripts/smoke_test.ps1)
+
+The smoke test builds the full stack from source via `docker compose up --build -d`, awaits service health, and asserts:
+1. Nginx static reverse proxy delivery of the React dashboard (`HTTP 200`).
+2. Feed rate control mutation and validation via reverse-proxied `POST /feed-rate`.
+3. Active trade persistence row growth in TimescaleDB over a measured interval.
+4. Continuous aggregate 1-second candle queries returning valid JSON arrays.
+5. Clean container and volume teardown (`docker compose down -v`).
+
+### 5.4 Code Quality & Linters
 * **Formatting:** `cargo fmt --all --check` returned exit code 0.
 * **Clippy:** `cargo clippy --workspace --all-targets --locked -- -D warnings` returned exit code 0.
 
-### 5.4 Frontend Test Suite & Production Bundle
+### 5.5 Frontend Test Suite & Production Bundle
 ```bash
 cd web
 npm test
 npm run build
 ```
-* **Vitest:** 2 test suites passed, 28 of 28 unit tests passed ([`web/src/lib/protocol.test.ts`](../web/src/lib/protocol.test.ts), [`web/src/lib/store.test.ts`](../web/src/lib/store.test.ts)). These test runtime wire schema validation, integer bounds, duplicate/stale trade side effect suppression, and book gap handling.
-* **Vite Build:** Produced optimized production bundle (`dist/index.html` 2.83 kB, `dist/assets/index-*.js` 314.58 kB gzip: 100.68 kB) in 834 ms.
+* **Vitest:** 3 test suites passed, 31 of 31 unit tests passed ([`web/src/components/candleReconcile.test.ts`](../web/src/components/candleReconcile.test.ts), [`web/src/lib/protocol.test.ts`](../web/src/lib/protocol.test.ts), [`web/src/lib/store.test.ts`](../web/src/lib/store.test.ts)). These test authoritative candle history reconciliation across network disconnects, runtime wire schema validation, integer bounds, duplicate/stale trade side effect suppression, and book gap handling.
+* **Vite Build:** Produced optimized production bundle (`dist/index.html` 2.83 kB, `dist/assets/index-*.js` 316.10 kB gzip: 101.19 kB) in 2.51s.
 
 ---
 
