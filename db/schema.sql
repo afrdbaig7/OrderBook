@@ -21,17 +21,18 @@ SELECT create_hypertable('trades', 'ts', if_not_exists => TRUE);
 
 CREATE INDEX IF NOT EXISTS trades_seq_idx ON trades (seq);
 
--- 1-second OHLCV continuous aggregate. `first`/`last` are
--- TimescaleDB's sort-based aggregates; everything is cast back to bigint so
--- the API layer reads plain integers.
+-- 1-second OHLCV continuous aggregate.
+-- `first(price, seq)` and `last(price, seq)` order strictly by engine sequence number,
+-- guaranteeing deterministic open and close prices even when hundreds of trades share
+-- the exact same millisecond timestamp.
 CREATE MATERIALIZED VIEW IF NOT EXISTS candles_1s
 WITH (timescaledb.continuous) AS
 SELECT time_bucket('1 second', ts) AS bucket,
-       first(price, ts)::bigint AS open,
-       max(price)           AS high,
-       min(price)           AS low,
-       last(price, ts)::bigint AS close,
-       sum(qty)::bigint     AS volume
+       first(price, seq)::bigint AS open,
+       max(price)                AS high,
+       min(price)                AS low,
+       last(price, seq)::bigint  AS close,
+       sum(qty)::bigint          AS volume
 FROM trades
 GROUP BY bucket
 WITH NO DATA;

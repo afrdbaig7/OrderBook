@@ -93,7 +93,8 @@ async fn persists_trades_and_candles() {
             format!("--port={port}"),
             "--feed-rate=2000".to_string(),
             "--seed=7".to_string(),
-            "--snapshot-depth=20".to_string(),
+            "--snapshot-depth=1000".to_string(),
+            "--allow-public-feed-rate".to_string(),
         ])
         .env("DATABASE_URL", url)
         .env("RUST_LOG", "warn")
@@ -314,6 +315,60 @@ async fn persists_trades_and_candles() {
         persisted_after - persisted_before,
         new_trades,
         "elapsed-time deadline (100ms) must flush partial batch without waiting for BATCH_ROWS (1000)"
+    );
+
+    // ── Focused Verification: Deterministic Candle Ordering (ts, seq) ──
+    // Insert 4 trades with identical millisecond timestamp and distinct prices into a fresh bucket
+    let test_bucket_ms: i64 = 1_850_000_000_000;
+    let test_prices = [100i64, 108i64, 95i64, 102i64];
+    for (i, &price) in test_prices.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO trades (ts, seq, price, qty, taker_side) VALUES (to_timestamp($1 / 1000.0), $2, $3, $4, 0)",
+        )
+        .bind(test_bucket_ms)
+        .bind(10_000_000i64 + i as i64)
+        .bind(price)
+        .bind(10i64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Refresh the continuous aggregate window over this bucket so the view is up-to-date
+    let _ = sqlx::query("CALL refresh_continuous_aggregate('candles_1s', to_timestamp($1 / 1000.0), to_timestamp($2 / 1000.0))")
+        .bind(test_bucket_ms)
+        .bind(test_bucket_ms + 1000)
+        .execute(&pool)
+        .await;
+
+    let candle_resp = http_request(
+        port,
+        "GET",
+        &format!(
+            "/candles?from={test_bucket_ms}&to={}&interval=1s",
+            test_bucket_ms + 1000
+        ),
+        "",
+    )
+    .await
+    .unwrap();
+    assert!(candle_resp.contains("200 OK"), "{candle_resp}");
+    let c_json: serde_json::Value =
+        serde_json::from_str(candle_resp.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let candles_arr = c_json["candles"].as_array().unwrap();
+    assert_eq!(candles_arr.len(), 1, "expected 1 candle for test bucket");
+    let bar = &candles_arr[0];
+    assert_eq!(
+        bar["open"].as_i64(),
+        Some(100),
+        "open must strictly equal first trade price (seq 0)"
+    );
+    assert_eq!(bar["high"].as_i64(), Some(108), "high must equal max price");
+    assert_eq!(bar["low"].as_i64(), Some(95), "low must equal min price");
+    assert_eq!(
+        bar["close"].as_i64(),
+        Some(102),
+        "close must strictly equal last trade price (seq 3)"
     );
 
     child.kill().await.expect("kill server");
