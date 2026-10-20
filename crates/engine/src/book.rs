@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::price_level::PriceLevel;
-use crate::types::{Event, Order, OrderId, Price, RejectReason, Side};
+use crate::types::{Event, Order, OrderId, Price, RejectReason, Side, MAX_ORDER_QTY, MAX_PRICE};
 
 /// Point-in-time view of the book, computed only by the engine.
 ///
@@ -141,21 +141,30 @@ impl OrderBook {
             .sum()
     }
 
+    /// Sensible upper bound on snapshot levels per side to prevent memory/bandwidth exhaustion.
+    pub const MAX_SNAPSHOT_DEPTH: usize = 10_000;
+
     /// Depth-limited view of the book; best prices first on each side.
+    /// If `depth == 0`, captures all resting levels up to [`Self::MAX_SNAPSHOT_DEPTH`].
     pub fn snapshot(&self, depth: usize) -> Snapshot {
+        let limit = if depth == 0 {
+            Self::MAX_SNAPSHOT_DEPTH
+        } else {
+            depth.min(Self::MAX_SNAPSHOT_DEPTH)
+        };
         Snapshot {
             seq: self.seq(),
             bids: self
                 .bids
                 .iter()
                 .rev()
-                .take(depth)
+                .take(limit)
                 .map(|(&p, l)| (p, l.total_qty()))
                 .collect(),
             asks: self
                 .asks
                 .iter()
-                .take(depth)
+                .take(limit)
                 .map(|(&p, l)| (p, l.total_qty()))
                 .collect(),
         }
@@ -227,10 +236,23 @@ impl OrderBook {
                 Side::Ask => &mut self.asks,
             };
             let level = levels.entry(order.price).or_default();
-            level.insert(Order {
-                qty: remaining,
-                ..order
-            });
+            if level
+                .try_insert(Order {
+                    qty: remaining,
+                    ..order
+                })
+                .is_err()
+            {
+                if level.is_empty() {
+                    levels.remove(&order.price);
+                }
+                events.push(Event::Reject {
+                    seq: self.take_seq(),
+                    id: order.id,
+                    reason: RejectReason::LevelQuantityOverflow,
+                });
+                return events;
+            }
             let new_total = level.total_qty();
             self.index.insert(order.id, (order.side, order.price));
             events.push(Event::Delta {
@@ -257,6 +279,14 @@ impl OrderBook {
                 seq: self.take_seq(),
                 id,
                 reason: RejectReason::ZeroQuantity,
+            });
+            return events;
+        }
+        if qty > MAX_ORDER_QTY {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::QuantityOutOfRange,
             });
             return events;
         }
@@ -358,8 +388,12 @@ impl OrderBook {
     fn reject_new_order(&self, id: OrderId, price: Price, qty: u64) -> Option<RejectReason> {
         if qty == 0 {
             Some(RejectReason::ZeroQuantity)
+        } else if qty > MAX_ORDER_QTY {
+            Some(RejectReason::QuantityOutOfRange)
         } else if price.0 == 0 {
             Some(RejectReason::ZeroPrice)
+        } else if price.0 > MAX_PRICE {
+            Some(RejectReason::PriceOutOfRange)
         } else if self.index.contains_key(&id) {
             Some(RejectReason::DuplicateOrderId)
         } else {

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use engine::{OrderBook, Price, PriceLevel, Side};
+use engine::{Event, OrderBook, Price, PriceLevel, Side};
 use feed::{messages_from_events, ClientBook, Command, Message, SyntheticFeed};
 
 /// Asserts the client's reconstructed book equals the engine's book.
@@ -158,4 +158,118 @@ fn engine_order(id: u64, side: Side, price: u64, qty: u64) -> engine::Order {
         price: Price(price),
         qty,
     }
+}
+
+/// Regression test: starting from a populated book deeper than a display or
+/// truncation limit.
+///
+/// Demonstrates that:
+/// 1. A depth-limited snapshot (e.g. depth 20 on a 30-level book) leads to an
+///    incomplete client ladder when the top levels trade out, despite `synced == true`.
+/// 2. A complete L2 snapshot (default bootstrap) preserves all resting depth,
+///    allowing the client ladder to seamlessly reveal newly exposed resting levels.
+#[test]
+fn regression_deep_book_snapshot_reconstruction() {
+    let mut engine = OrderBook::new();
+
+    // Populate book with 30 distinct bid levels (130 down to 101)
+    // and 30 distinct ask levels (140 up to 169).
+    for i in 0..30 {
+        Command::Limit(engine_order(100 + i, Side::Bid, 130 - i, 10)).apply(&mut engine);
+        Command::Limit(engine_order(200 + i, Side::Ask, 140 + i, 10)).apply(&mut engine);
+    }
+    assert_eq!(engine.bid_levels().len(), 30);
+    assert_eq!(engine.ask_levels().len(), 30);
+
+    // Case 1: An artificially truncated snapshot (depth = 20)
+    let truncated_snap = Message::from_snapshot(&engine.snapshot(20));
+    let mut truncated_client = ClientBook::new();
+    truncated_client.apply(&truncated_snap);
+    assert_eq!(truncated_client.bids().len(), 20);
+
+    // Case 2: Complete L2 bootstrap snapshot (depth = 0 or 1,000)
+    let full_snap = Message::from_snapshot(&engine.snapshot(0));
+    let mut complete_client = ClientBook::new();
+    complete_client.apply(&full_snap);
+    assert_eq!(complete_client.bids().len(), 30);
+
+    // Now sweep out the top 10 bid levels via market asks:
+    // Taker asks match against best bids (prices 130 down to 121).
+    let sweep = Command::Market {
+        id: engine::OrderId(999),
+        side: Side::Ask,
+        qty: 100, // 10 levels * 10 qty each = 100
+    };
+    let events = sweep.apply(&mut engine);
+    for msg in feed::messages_from_events(&events) {
+        truncated_client.apply(&msg);
+        complete_client.apply(&msg);
+    }
+
+    // Engine now has 20 bid levels remaining (prices 120 down to 101).
+    assert_eq!(engine.bid_levels().len(), 20);
+
+    // Truncated client reports synced=true and contiguous seq, BUT its ladder is incomplete!
+    // It only has 10 levels left (prices 120 down to 111) because prices 110..101 were never sent!
+    assert!(truncated_client.is_synced());
+    assert_eq!(truncated_client.last_seq(), engine.seq());
+    assert_eq!(
+        truncated_client.bids().len(),
+        10,
+        "truncated client missed levels 110..101"
+    );
+    let (trunc_ladder_bids, _) = truncated_client.ladder(20);
+    assert_eq!(trunc_ladder_bids.len(), 10, "ladder shows incomplete depth");
+
+    // Complete client reports synced=true AND its ladder is 100% complete:
+    // It correctly displays all 20 levels (prices 120 down to 101), matching engine exactly!
+    assert!(complete_client.is_synced());
+    assert_eq!(complete_client.last_seq(), engine.seq());
+    assert_eq!(complete_client.bids().len(), 20);
+    let (comp_ladder_bids, _) = complete_client.ladder(20);
+    assert_eq!(
+        comp_ladder_bids.len(),
+        20,
+        "ladder displays all 20 visible levels"
+    );
+    assert_synced(
+        &complete_client,
+        &engine,
+        "complete bootstrap preserves deep levels",
+    );
+}
+
+/// Soak test: runs 30,000 commands and verifies candidate pool size stays strictly
+/// bounded, while tracking successful cancels vs rejected cancels.
+#[test]
+fn feed_memory_remains_bounded_and_measures_cancel_rates() {
+    let mut feed = SyntheticFeed::new(feed::FeedConfig {
+        max_live_candidates: 300,
+        ..Default::default()
+    });
+    let mut engine = OrderBook::new();
+
+    let mut successful_cancels = 0u64;
+    let mut rejected_cancels = 0u64;
+
+    for _ in 0..30_000 {
+        let cmd = feed.next_command();
+        assert!(
+            feed.live_hint() <= 300,
+            "live candidate pool exceeded bound: {}",
+            feed.live_hint()
+        );
+        let events = cmd.apply(&mut engine);
+        if matches!(cmd, Command::Cancel(_)) {
+            if events.iter().any(|e| matches!(e, Event::Cancel { .. })) {
+                successful_cancels += 1;
+            } else if events.iter().any(|e| matches!(e, Event::Reject { .. })) {
+                rejected_cancels += 1;
+            }
+        }
+    }
+
+    assert!(successful_cancels > 0, "must produce successful cancels");
+    assert!(rejected_cancels > 0, "must track stale candidates cleanly");
+    assert!(feed.live_hint() <= 300);
 }

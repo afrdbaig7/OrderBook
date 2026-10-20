@@ -20,6 +20,8 @@ pub struct ClientBook {
     desynced: bool,
 }
 
+pub type LadderSide = Vec<(Price, u64)>;
+
 impl ClientBook {
     pub fn new() -> Self {
         Self::default()
@@ -105,5 +107,23 @@ impl ClientBook {
 
     pub fn is_desynced(&self) -> bool {
         self.desynced
+    }
+
+    /// Returns the best `depth` bids (descending) and asks (ascending).
+    pub fn ladder(&self, depth: usize) -> (LadderSide, LadderSide) {
+        let bids = self
+            .bids
+            .iter()
+            .rev()
+            .take(depth)
+            .map(|(&p, &q)| (p, q))
+            .collect();
+        let asks = self
+            .asks
+            .iter()
+            .take(depth)
+            .map(|(&p, &q)| (p, q))
+            .collect();
+        (bids, asks)
     }
 }
