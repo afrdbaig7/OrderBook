@@ -1,6 +1,6 @@
 # Order Book
 
-A high-performance limit order book and matching engine written in Rust, featuring real-time WebSocket market-data streaming, batched TimescaleDB persistence, and an interactive web dashboard.
+A Rust matching-engine learning project with a live dashboard, property and differential tests, and reproducible performance experiments. Built with AI assistance; I’m looking for feedback on matching semantics, stream reconstruction, and failure handling.
 
 ---
 
@@ -17,6 +17,7 @@ Open **<http://localhost:5173>** in your browser.
 ![Order Book Dashboard](docs/dashboard.png)
 
 * The web dashboard displays the real-time depth ladder, live trade tape, 1-second candlestick chart, and throughput/price readouts (mid, spread, last, msg/s, trd/s, seq).
+* In the local Docker stack, public feed rate control is enabled (`ALLOW_PUBLIC_FEED_RATE=true`) so you can experiment with different workloads directly from the web header.
 * To stop the stack while preserving database data: `docker compose down`.
 * To stop and permanently remove database volumes: `docker compose down -v`.
 
@@ -204,7 +205,7 @@ To maintain clear architectural boundaries and high code quality:
 4. **JSON Wire Protocol**: WebSocket frames use tagged JSON text rather than binary serialization (e.g. SBE, FlatBuffers).
 5. **O(n) Cancellation**: Orders within a single price level are stored in a `VecDeque`, making cancellation $O(n)$ in level depth.
 6. **Localhost Latency**: Benchmarks reflect loopback communication on a single workstation, not real-world wide-area network latency.
-7. **Candle Close Tie-Breaking**: The `candles_1s` continuous aggregate calculates `close` using `last(price, ts)`. Because `last(price, ts)` orders by millisecond timestamp alone and multiple trades can execute within the same millisecond, the recorded `close` can differ by a few ticks from the exact `(ts, seq)`-ordered final trade of the second (`open`, `high`, `low`, and `volume` reconcile exactly).
+7. **Deterministic Candle Sequencing**: In `candles_1s`, `open` and `close` use `first(price, seq)` and `last(price, seq)` to sequence trades deterministically by monotonic sequence number when multiple trades execute within the same millisecond timestamp. Real-time aggregation is enabled (`materialized_only = false`) so queries incorporate raw trades from the live unmaterialized edge.
 8. **Duplicate Order IDs**: A duplicate `OrderId` is rejected while it rests in the book. If an order has already fully filled or been cancelled and removed, re-using that `OrderId` is not tracked (documented engine boundary; the engine stores market data rather than a durable transaction ledger).
 
 ---

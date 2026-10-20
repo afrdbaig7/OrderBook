@@ -25,8 +25,12 @@ CREATE INDEX IF NOT EXISTS trades_seq_idx ON trades (seq);
 -- `first(price, seq)` and `last(price, seq)` order strictly by engine sequence number,
 -- guaranteeing deterministic open and close prices even when hundreds of trades share
 -- the exact same millisecond timestamp.
+--
+-- `timescaledb.materialized_only = false` explicitly enables real-time aggregation
+-- (which TimescaleDB disables by default starting in version 2.13), ensuring queries
+-- combine materialized historical data with the unmaterialized live edge.
 CREATE MATERIALIZED VIEW IF NOT EXISTS candles_1s
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT time_bucket('1 second', ts) AS bucket,
        first(price, seq)::bigint AS open,
        max(price)                AS high,
@@ -36,6 +40,15 @@ SELECT time_bucket('1 second', ts) AS bucket,
 FROM trades
 GROUP BY bucket
 WITH NO DATA;
+
+-- Upgrade path for existing databases: explicitly ensure materialized_only = false
+-- is applied even if the materialized view already existed.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'candles_1s') THEN
+        ALTER MATERIALIZED VIEW candles_1s SET (timescaledb.materialized_only = false);
+    END IF;
+END $$;
 
 -- Keep a 1-hour window materialized just behind the live edge; the most
 -- recent second is always covered by real-time aggregation, so `/candles`
