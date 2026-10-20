@@ -15,10 +15,12 @@
 //!
 //! Run with: `cargo bench -p bench`
 
+use std::time::Duration;
+
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 
 use bench::{ask_depth, ask_qty, bid_depth, mixed_script, two_sided, BASE_PRICE};
-use engine::{Order, OrderId, Price, Side};
+use engine::{Order, OrderBook, OrderId, Price, Side};
 
 const DEPTHS: [u64; 3] = [10, 1_000, 100_000];
 const PER_LEVEL: u64 = 4;
@@ -161,11 +163,71 @@ fn bench_mixed(c: &mut Criterion) {
     }
 }
 
+const QUEUE_LENGTHS: [usize; 3] = [4, 50, 500];
+
+/// Cancel resting orders varying queue length at a single price level.
+/// Characterizes O(n) VecDeque traversal cost in level queue length.
+fn bench_cancel_queue_length(c: &mut Criterion) {
+    for len in QUEUE_LENGTHS {
+        let mut template = OrderBook::new();
+        for i in 1..=len {
+            template.submit_limit(Order {
+                id: OrderId(i as u64),
+                side: Side::Bid,
+                price: Price(BASE_PRICE),
+                qty: 10,
+            });
+        }
+
+        let mut group = c.benchmark_group(format!("cancel_queue_length/len_{len}"));
+        group.sample_size(10);
+        group.measurement_time(Duration::from_millis(500));
+        group.warm_up_time(Duration::from_millis(200));
+        group.throughput(Throughput::Elements(1));
+
+        // Front of queue (index 0)
+        group.bench_function("front", |b| {
+            b.iter_batched_ref(
+                || template.clone(),
+                |book: &mut OrderBook| {
+                    book.cancel(OrderId(1));
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        // Middle of queue
+        group.bench_function("middle", |b| {
+            b.iter_batched_ref(
+                || template.clone(),
+                |book: &mut OrderBook| {
+                    book.cancel(OrderId((len / 2) as u64));
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        // Back of queue
+        group.bench_function("back", |b| {
+            b.iter_batched_ref(
+                || template.clone(),
+                |book: &mut OrderBook| {
+                    book.cancel(OrderId(len as u64));
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_insert,
     bench_match,
     bench_cancel,
+    bench_cancel_queue_length,
     bench_mixed
 );
 criterion_main!(benches);

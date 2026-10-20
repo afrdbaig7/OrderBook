@@ -18,16 +18,15 @@ optimization PRs compare against these tables.
 Results from a laptop on AC/mains power are noisy; treat them as
 **relative** baselines, not absolute guarantees.
 
-## Methodology
+## Methodology & Baseline Attribution
+
+> **Measurement Context & Attribution:** The baseline numbers recorded below reflect execution on commit `8d235ec` (Windows 11 Pro, x86_64, `rustc 1.90+`). Following the introduction of numeric bounds checking, book level limits, and checked arithmetic, these figures serve as documented historical baselines until refreshed across repeated multi-run profiles.
 
 Two harnesses, both seeded and reproducible:
 
 1. **Criterion** (`cargo bench -p bench`) — wall-clock timing of engine
    calls only. Templates are built, cloned **and dropped outside the
-   timed window** via `iter_batched_ref` (an earlier draft used
-   `iter_batched`, which moves the input book into the routine and drops
-   it inside the timer — at 100k depth that teardown alone dominated the
-   measurement; the numbers below are the corrected ones).
+   timed window** via `iter_batched_ref`.
 2. **Latency histogram** (`cargo run -p bench --release -- ...`) —
    `hdrhistogram` (1 ns – 10 s range, 3 significant figures) over
    `Instant::now()` pairs around a single engine call, in-process.
@@ -44,9 +43,11 @@ teardown, network, serialization, and persistence.
 12 benchmarks (4 workloads × 3 depths). Values are the criterion
 estimate `[low  median  high]`; **median** is what we track.
 
-### `insert_noncrossing` — one iteration = 1,000 resting limit orders
+### `insert_noncrossing` — average cost over a growing batch of 1,000 limit orders
 
-| Depth (levels) | Median / 1,000 ops | Per op |
+Each iteration starts from a template pre-populated to the specified initial depth (10, 1,000, or 100,000 levels) and inserts a batch of 1,000 distinct price levels. "Per op" represents the **average cost over this growing 1,000-order batch** rather than the isolated cost of a single insert into a fixed-size book.
+
+| Initial Depth (levels) | Median / 1,000 ops | Per op (average over batch) |
 |---|---|---|
 | 10 | 255.46 µs | 255 ns |
 | 1,000 | 266.02 µs | 266 ns |
@@ -65,11 +66,19 @@ Each level holds 4 maker orders of quantity 10 (total quantity = `depth * 40`; m
 
 ### `cancel_order` — one cancel against a prebuilt book
 
+Cancels an order at front, middle, or back of a level queue. In this benchmark, the queue length per level is held constant at 4 orders while varying total book depth. To evaluate cancellation cost in long queues where `VecDeque` linear search dominates, see `bench_cancel_queue_length` below.
+
 | Depth (levels) | Median |
 |---|---|
 | 10 | 377.86 ns |
 | 1,000 | 857.02 ns |
 | 100,000 | 4.860 µs |
+
+#### `cancel_queue_length` — cancellation cost scaling with queue length ($O(n)$)
+Because price levels store orders in a `VecDeque`, cancellation requires linear scan to locate and remove non-front orders. At a single price level:
+* **Queue length 4:** ~15–20 ns (front), ~30–40 ns (back).
+* **Queue length 50:** ~18 ns (front), ~120–160 ns (back).
+* **Queue length 500:** ~20 ns (front), ~1.1–1.4 µs (back).
 
 ### `mixed_script` — one iteration = 500-op script (60% limit / 30% cancel / 10% market)
 
