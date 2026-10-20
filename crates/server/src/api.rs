@@ -98,6 +98,13 @@ pub async fn candles(
     State(state): State<AppState>,
     Query(query): Query<CandlesQuery>,
 ) -> Result<Json<CandlesResponse>, (StatusCode, String)> {
+    let _permit = state.candle_semaphore.try_acquire().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "candle query concurrency limit reached; try again shortly".to_string(),
+        )
+    })?;
+
     if query.interval != "1s" {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -181,8 +188,39 @@ pub struct SetFeedRate {
 /// `POST /feed-rate`.
 pub async fn set_feed_rate(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SetFeedRate>,
 ) -> Result<Json<FeedRateResponse>, (StatusCode, String)> {
+    if !state.allow_public_feed_rate {
+        match &state.admin_token {
+            Some(token) => {
+                let authorized = headers
+                    .get("x-admin-token")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v == token)
+                    .unwrap_or(false)
+                    || headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v == format!("Bearer {token}"))
+                        .unwrap_or(false);
+
+                if !authorized {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized: valid admin token required to change feed rate".to_string(),
+                    ));
+                }
+            }
+            None => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "feed rate modification is disabled on this server".to_string(),
+                ));
+            }
+        }
+    }
+
     if body.orders_per_second > MAX_FEED_RATE {
         return Err((
             StatusCode::BAD_REQUEST,

@@ -31,4 +31,12 @@ pub struct AppState {
     /// Connection pool slot. `None` when persistence is disabled or the DB
     /// is not reachable yet, in which case `/candles` returns `503`.
     pub persistence: Persistence,
+    /// Shutdown signal receiver to allow active connections and WebSockets to terminate promptly.
+    pub shutdown: tokio::sync::watch::Receiver<bool>,
+    /// Bounded concurrency limiter for candle database queries.
+    pub candle_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Optional administrative token for protecting feed-rate mutations.
+    pub admin_token: Option<String>,
+    /// If true, POST /feed-rate is publicly accessible without authentication.
+    pub allow_public_feed_rate: bool,
 }
