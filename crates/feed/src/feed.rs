@@ -47,6 +47,8 @@ pub struct FeedConfig {
     /// Percentage that are cancels (`limit_pct + cancel_pct <= 100`; the
     /// remainder are market orders).
     pub cancel_pct: u8,
+    /// Maximum live cancel candidates retained in memory (bounds candidate collection size).
+    pub max_live_candidates: usize,
 }
 
 impl Default for FeedConfig {
@@ -59,6 +61,7 @@ impl Default for FeedConfig {
             max_qty: 100,
             limit_pct: 70,
             cancel_pct: 20,
+            max_live_candidates: 10_000,
         }
     }
 }
@@ -149,7 +152,13 @@ impl SyntheticFeed {
         };
         let qty = self.size();
         let id = self.take_id();
-        self.live.push(id);
+        let max_candidates = self.config.max_live_candidates.max(100);
+        if self.live.len() < max_candidates {
+            self.live.push(id);
+        } else {
+            let idx = self.rng.random_range(0..self.live.len());
+            self.live[idx] = id;
+        }
         Command::Limit(Order {
             id,
             side,

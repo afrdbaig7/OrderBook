@@ -91,21 +91,46 @@ export function CandleChart({
     };
   }, []);
 
-  // History: replace the series whenever `/candles` refreshes.
+  // History: merge /candles data, preserving active live bar and pruning outside window.
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) {
       return;
     }
     const buckets = bucketsRef.current;
+    let maxTs = 0;
+
     for (const candle of candles) {
-      buckets.set(candle.ts, candle);
+      if (candle.ts > maxTs) {
+        maxTs = candle.ts;
+      }
+      const existing = buckets.get(candle.ts);
+      if (!existing) {
+        buckets.set(candle.ts, candle);
+      } else {
+        // Reconcile: historical settled candle updates past buckets,
+        // but for active/newer bars, merge high/low/volume and preserve latest live close.
+        existing.high = Math.max(existing.high, candle.high);
+        existing.low = Math.min(existing.low, candle.low);
+        existing.volume = Math.max(existing.volume, candle.volume);
+      }
     }
+
+    // Prune buckets to the fixed rolling history window (e.g. 120s)
+    if (maxTs > 0) {
+      const cutoff = maxTs - seconds * 1000;
+      for (const key of buckets.keys()) {
+        if (key < cutoff) {
+          buckets.delete(key);
+        }
+      }
+    }
+
     const data = [...buckets.values()]
       .sort((a, b) => a.ts - b.ts)
       .map(toBar);
     series.setData(data);
-  }, [candles]);
+  }, [candles, seconds]);
 
   // Live edge: fold trade messages into the current bar, flush per frame.
   useEffect(() => {
@@ -143,6 +168,14 @@ export function CandleChart({
           close: trade.price,
           volume: trade.qty,
         });
+
+        // Rolling window prune on new second bucket
+        const cutoff = ts - seconds * 1000;
+        for (const key of buckets.keys()) {
+          if (key < cutoff) {
+            buckets.delete(key);
+          }
+        }
       }
       dirtyRef.current.add(ts);
       if (rafRef.current === undefined) {
@@ -156,7 +189,7 @@ export function CandleChart({
         cancelAnimationFrame(rafRef.current);
       }
     };
-  }, [store]);
+  }, [store, seconds]);
 
   return (
     <section className="chart">
