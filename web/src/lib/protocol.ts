@@ -1,5 +1,7 @@
 // Wire protocol for the `/ws` market data stream, plus a pure TypeScript
-// reference implementation of the client-side book.
+// reference implementation of the client-side book with strict runtime validation.
+
+export const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER; // 2^53 - 1 (9,007,199,254,740,991)
 
 export type Side = "bid" | "ask";
 
@@ -48,6 +50,13 @@ export interface Reject {
 
 export type WireMessage = Snapshot | Delta | Trade | Ack | Cancel | Reject;
 
+export type ApplyStatus = "applied" | "ignored" | "gap";
+
+export interface ApplyResult {
+  status: ApplyStatus;
+  message?: string;
+}
+
 // ── Client-side reconstruction (mirror of crate `feed`'s `ClientBook`) ──
 
 /**
@@ -68,26 +77,32 @@ export class PureOrderBook {
   synced = false;
   desynced = false;
 
-  apply(message: WireMessage): void {
+  apply(message: WireMessage): ApplyResult {
     if (message.type === "snapshot") {
       this.bids = new Map(message.bids);
       this.asks = new Map(message.asks);
       this.lastSeq = message.seq;
       this.synced = true;
       this.desynced = false;
-      return;
+      return { status: "applied" };
     }
 
     if (!this.synced || this.desynced) {
-      return;
+      return { status: "ignored", message: "book is not synced or is desynced" };
     }
 
     if (message.seq <= this.lastSeq) {
-      return;
+      return {
+        status: "ignored",
+        message: `stale message: seq ${message.seq} <= lastSeq ${this.lastSeq}`,
+      };
     }
     if (message.seq !== this.lastSeq + 1) {
       this.desynced = true;
-      return;
+      return {
+        status: "gap",
+        message: `sequence gap: expected ${this.lastSeq + 1}, got ${message.seq}`,
+      };
     }
 
     if (message.type === "delta") {
@@ -100,6 +115,7 @@ export class PureOrderBook {
     }
 
     this.lastSeq = message.seq;
+    return { status: "applied" };
   }
 
   /** Best bids (descending) and best asks (ascending). */
@@ -111,10 +127,83 @@ export class PureOrderBook {
   }
 }
 
+function isSafePositiveInt(n: unknown): n is number {
+  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 && n <= MAX_SAFE_INTEGER;
+}
+
+function isSafeNonNegativeInt(n: unknown): n is number {
+  return typeof n === "number" && Number.isSafeInteger(n) && n >= 0 && n <= MAX_SAFE_INTEGER;
+}
+
+function isSide(s: unknown): s is Side {
+  return s === "bid" || s === "ask";
+}
+
+/**
+ * Validates wire messages at runtime: checks supported type, required fields,
+ * valid side strings, tuple structure, and numeric bounds.
+ */
 export function isWireMessage(value: unknown): value is WireMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { type?: unknown }).type === "string"
-  );
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.type !== "string" || !isSafeNonNegativeInt(obj.seq)) {
+    return false;
+  }
+
+  switch (obj.type) {
+    case "snapshot": {
+      if (!Array.isArray(obj.bids) || !Array.isArray(obj.asks)) {
+        return false;
+      }
+      for (const item of obj.bids) {
+        if (
+          !Array.isArray(item) ||
+          item.length !== 2 ||
+          !isSafePositiveInt(item[0]) ||
+          !isSafePositiveInt(item[1])
+        ) {
+          return false;
+        }
+      }
+      for (const item of obj.asks) {
+        if (
+          !Array.isArray(item) ||
+          item.length !== 2 ||
+          !isSafePositiveInt(item[0]) ||
+          !isSafePositiveInt(item[1])
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case "delta": {
+      return (
+        isSide(obj.side) &&
+        isSafePositiveInt(obj.price) &&
+        isSafeNonNegativeInt(obj.qty)
+      );
+    }
+    case "trade": {
+      return (
+        isSafePositiveInt(obj.price) &&
+        isSafePositiveInt(obj.qty) &&
+        isSide(obj.taker_side) &&
+        isSafeNonNegativeInt(obj.ts)
+      );
+    }
+    case "ack": {
+      return isSafeNonNegativeInt(obj.id);
+    }
+    case "cancel": {
+      return isSafeNonNegativeInt(obj.id);
+    }
+    case "reject": {
+      return isSafeNonNegativeInt(obj.id) && typeof obj.reason === "string";
+    }
+    default:
+      return false;
+  }
 }

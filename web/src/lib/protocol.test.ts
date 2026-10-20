@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PureOrderBook, type Snapshot } from "./protocol";
+import { isWireMessage, PureOrderBook, type Snapshot } from "./protocol";
 
 const snapshot = (): Snapshot => ({
   type: "snapshot",
@@ -81,6 +81,81 @@ describe("PureOrderBook", () => {
     expect(book.synced).toBe(true);
     expect(book.lastSeq).toBe(100);
     expect(book.bids.get(200)).toBe(1);
+  });
+
+  it("returns explicit ApplyResult status for every operation", () => {
+    const book = new PureOrderBook();
+    const res0 = book.apply({ type: "delta", seq: 1, side: "bid", price: 100, qty: 10 });
+    expect(res0.status).toBe("ignored");
+
+    const res1 = book.apply(snapshot());
+    expect(res1.status).toBe("applied");
+
+    const res2 = book.apply({ type: "delta", seq: 11, side: "bid", price: 100, qty: 60 });
+    expect(res2.status).toBe("applied");
+
+    // Stale message
+    const res3 = book.apply({ type: "delta", seq: 11, side: "bid", price: 100, qty: 60 });
+    expect(res3.status).toBe("ignored");
+
+    // Sequence gap
+    const res4 = book.apply({ type: "delta", seq: 15, side: "bid", price: 100, qty: 60 });
+    expect(res4.status).toBe("gap");
+  });
+});
+
+describe("isWireMessage runtime validation", () => {
+  it("rejects incomplete snapshot objects", () => {
+    // Specifically reproduces the bug: isWireMessage({type: "snapshot"}) returning true
+    expect(isWireMessage({ type: "snapshot" })).toBe(false);
+    expect(isWireMessage({ type: "snapshot", seq: 1 })).toBe(false);
+    expect(isWireMessage({ type: "snapshot", seq: 1, bids: [] })).toBe(false);
+  });
+
+  it("validates valid snapshot messages", () => {
+    expect(isWireMessage(snapshot())).toBe(true);
+  });
+
+  it("rejects invalid delta schemas and side values", () => {
+    expect(isWireMessage({ type: "delta", seq: 1, side: "invalid", price: 100, qty: 10 })).toBe(false);
+    expect(isWireMessage({ type: "delta", seq: 1, side: "bid", price: -10, qty: 10 })).toBe(false);
+    expect(isWireMessage({ type: "delta", seq: 1, side: "bid", price: 100, qty: -1 })).toBe(false);
+    expect(isWireMessage({ type: "delta", seq: 1, side: "bid", price: 100.5, qty: 10 })).toBe(false);
+  });
+
+  it("rejects numbers exceeding MAX_SAFE_INTEGER", () => {
+    expect(
+      isWireMessage({
+        type: "delta",
+        seq: 1,
+        side: "bid",
+        price: Number.MAX_SAFE_INTEGER + 10,
+        qty: 10,
+      })
+    ).toBe(false);
+  });
+
+  it("validates trade messages strictly", () => {
+    expect(
+      isWireMessage({
+        type: "trade",
+        seq: 1,
+        price: 100,
+        qty: 10,
+        taker_side: "bid",
+        ts: 1_700_000_000_000,
+      })
+    ).toBe(true);
+    expect(
+      isWireMessage({
+        type: "trade",
+        seq: 1,
+        price: 0,
+        qty: 10,
+        taker_side: "bid",
+        ts: 1_700_000_000_000,
+      })
+    ).toBe(false);
   });
 });
 

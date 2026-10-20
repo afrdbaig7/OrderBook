@@ -106,6 +106,47 @@ describe("MarketStore reconstruction", () => {
     expect(view.trades).toBe(2);
     expect(view.lastPrice).toBe(101);
   });
+
+  it("does not increment trades or duplicate tape entries on stale/duplicate trades", () => {
+    // Specifically reproduces the bug: applying same trade twice leaves sequence
+    // unchanged but increments counter and tape.
+    const store = new MarketStore();
+    const tradeCallbackSeqs: number[] = [];
+    store.onTrade((t) => tradeCallbackSeqs.push(t.seq));
+
+    store.apply(snapshot());
+    store.apply(trade(11, 105, 10));
+
+    const view1 = store.render(10);
+    expect(view1.trades).toBe(1);
+    expect(view1.tape).toHaveLength(1);
+    expect(view1.tape[0].seq).toBe(11);
+    expect(tradeCallbackSeqs).toEqual([11]);
+
+    // Apply the exact same trade again (stale sequence)
+    store.apply(trade(11, 105, 10));
+
+    const view2 = store.render(10);
+    expect(view2.trades).toBe(1); // Unchanged!
+    expect(view2.tape).toHaveLength(1); // Unchanged!
+    expect(tradeCallbackSeqs).toEqual([11]); // Listener NOT invoked again!
+  });
+
+  it("does not apply trade side effects on a gapped trade", () => {
+    const store = new MarketStore();
+    const tradeCallbackSeqs: number[] = [];
+    store.onTrade((t) => tradeCallbackSeqs.push(t.seq));
+
+    store.apply(snapshot()); // seq 10
+    // Skip seq 11 and send seq 15
+    store.apply(trade(15, 105, 10));
+
+    const view = store.render(10);
+    expect(view.desynced).toBe(true);
+    expect(view.trades).toBe(0); // Trade was rejected by PureOrderBook!
+    expect(view.tape).toHaveLength(0);
+    expect(tradeCallbackSeqs).toHaveLength(0);
+  });
 });
 
 describe("withCumulative", () => {

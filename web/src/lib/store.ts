@@ -101,7 +101,10 @@ export class MarketStore {
   }
 
   private applyToBook(message: WireMessage): void {
-    this.book.apply(message);
+    const result = this.book.apply(message);
+    if (result.status !== "applied") {
+      return;
+    }
     if (message.type === "trade") {
       this.trades += 1;
       this.lastPrice = message.price;
