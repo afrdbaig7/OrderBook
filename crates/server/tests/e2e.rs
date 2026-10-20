@@ -150,7 +150,8 @@ async fn live_server_stream() {
             format!("--port={port}"),
             "--feed-rate=5000".to_string(),
             "--seed=42".to_string(),
-            "--snapshot-depth=20".to_string(),
+            "--snapshot-depth=1000".to_string(),
+            "--allow-public-feed-rate".to_string(),
         ])
         .env("RUST_LOG", "warn")
         .env("RUST_BACKTRACE", "1")
@@ -246,6 +247,87 @@ async fn live_server_stream() {
         .await
         .expect("get /health");
     assert!(health.contains("\"feed_rate\":3000"), "{health}");
+
+    child.kill().await.expect("kill server");
+    let _ = child.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_client_eviction_and_recovery() {
+    let port = free_port().await;
+    let bin = env!("CARGO_BIN_EXE_server");
+
+    // Launch server with small broadcast capacity (32 messages) and fast feed (2000 msgs/s)
+    let mut child = Command::new(bin)
+        .args([
+            format!("--port={port}"),
+            "--feed-rate=2000".to_string(),
+            "--seed=42".to_string(),
+            "--snapshot-depth=1000".to_string(),
+            "--broadcast-capacity=32".to_string(),
+            "--allow-public-feed-rate".to_string(),
+        ])
+        .env("RUST_LOG", "warn")
+        .env("RUST_BACKTRACE", "1")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    wait_for_health(port).await;
+
+    // 1. Slow client connects, reads snapshot, then stops reading.
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut slow_socket, _) = timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .expect("ws connect")
+    .expect("ws handshake");
+
+    // Read the snapshot
+    let first = slow_socket.next().await.expect("snapshot").expect("ws ok");
+    assert!(first.is_text(), "expected snapshot text");
+
+    // Intentionally stall for 200ms: at 2000 msgs/s, ~400 messages are produced,
+    // easily overflowing the 32-slot ring buffer and causing RecvError::Lagged.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The server should evict the slow subscriber by closing the connection.
+    let mut closed = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), slow_socket.next()).await {
+            Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => {
+                closed = true;
+                break;
+            }
+            Ok(None) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(Err(_))) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(Ok(_))) => {
+                // Drain any frames already buffered before eviction
+            }
+            Err(_) => {}
+        }
+    }
+    assert!(closed, "slow client was not evicted/closed as expected");
+
+    // 2. Client recovers: throttle feed rate so reconnected client receives messages comfortably.
+    let _ = http_request(port, "POST", "/feed-rate", r#"{"orders_per_second":100}"#)
+        .await
+        .expect("throttle feed rate");
+
+    let mut book = ClientBook::new();
+    assert_continuous_stream(port, &mut book, 50, false).await;
+    assert!(!book.is_desynced(), "reconnected client desynced");
 
     child.kill().await.expect("kill server");
     let _ = child.wait().await;

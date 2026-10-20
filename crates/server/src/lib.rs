@@ -34,7 +34,7 @@ use crossbeam_channel::{bounded, Sender};
 use engine::OrderBook;
 use feed::{FeedConfig, SyntheticFeed};
 use tokio::sync::{broadcast, watch};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::engine_thread::{EngineCommand, ServerEvent, TradeRow};
@@ -66,12 +66,21 @@ pub struct Args {
     /// Seed for the deterministic synthetic feed.
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
-    /// Book levels returned in each bootstrap snapshot.
-    #[arg(long = "snapshot-depth", default_value_t = 20)]
+    /// Book levels returned in each bootstrap snapshot (default 1000, 0 for full book up to 10000).
+    #[arg(long = "snapshot-depth", default_value_t = 1000)]
     pub snapshot_depth: usize,
     /// Postgres/TimescaleDB DSN. Persistence is disabled when unset.
     #[arg(long, env = "DATABASE_URL")]
     pub database_url: Option<String>,
+    /// Optional administrative token for protecting feed-rate modifications.
+    #[arg(long, env = "ADMIN_TOKEN")]
+    pub admin_token: Option<String>,
+    /// If true, POST /feed-rate is publicly accessible without authentication.
+    #[arg(long = "allow-public-feed-rate", default_value_t = false)]
+    pub allow_public_feed_rate: bool,
+    /// Capacity of the WebSocket broadcast ring buffer (default 65536).
+    #[arg(long = "broadcast-capacity", default_value_t = BROADCAST_CAPACITY)]
+    pub broadcast_capacity: usize,
 }
 
 /// Runs the server until Ctrl-C, then shuts down gracefully.
@@ -86,7 +95,7 @@ pub async fn run(args: Args) {
     let feed_rate = Arc::new(AtomicU64::new(args.feed_rate));
 
     let (cmd_tx, cmd_rx) = bounded::<EngineCommand>(ENGINE_CHANNEL_CAPACITY);
-    let (broadcast_tx, _) = broadcast::channel::<Arc<ServerEvent>>(BROADCAST_CAPACITY);
+    let (broadcast_tx, _) = broadcast::channel::<Arc<ServerEvent>>(args.broadcast_capacity);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let persistence: Persistence = Arc::new(tokio::sync::RwLock::new(None));
 
@@ -147,6 +156,10 @@ pub async fn run(args: Args) {
         feed_rate: feed_rate.clone(),
         snapshot_depth: args.snapshot_depth,
         persistence: persistence.clone(),
+        shutdown: shutdown_rx.clone(),
+        candle_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        admin_token: args.admin_token,
+        allow_public_feed_rate: args.allow_public_feed_rate,
     };
 
     let router = Router::new()
@@ -171,20 +184,48 @@ pub async fn run(args: Args) {
         "server listening"
     );
 
+    let shutdown_signal_future = {
+        let shutdown_tx = shutdown_tx.clone();
+        async move {
+            shutdown_signal().await;
+            info!("shutdown signal received; notifying feed and active WebSockets");
+            let _ = shutdown_tx.send(true);
+        }
+    };
+
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal_future)
         .await
         .expect("server error");
 
-    // ── Graceful shutdown ───────────────────────────────────────────────
-    info!("shutting down");
-    let _ = shutdown_tx.send(true); // stops feed + metrics + db tasks
-    let _ = cmd_tx.send(EngineCommand::Shutdown);
-    let _ = feed_handle.await;
-    let _ = metrics_handle.await;
-    let _ = engine_handle.join();
-    if let Some(handle) = db_handle {
-        let _ = handle.await;
+    // ── Graceful shutdown (strictly ordered with bounded timeout) ───────
+    info!("initiating graceful shutdown sequence");
+    let shutdown_timeout = Duration::from_secs(10);
+    let shutdown_work = async {
+        // 1. Stop the feed and wait for it to stop
+        let _ = shutdown_tx.send(true);
+        let _ = feed_handle.await;
+        info!("feed task stopped");
+
+        // 2. Tell the engine to finish its queued commands and exit
+        let _ = cmd_tx.send(EngineCommand::Shutdown);
+        let _ = engine_handle.join();
+        info!("engine thread finished all queued commands and exited");
+
+        // 3. Let persistence writer drain until disconnected then flush
+        if let Some(handle) = db_handle {
+            let _ = handle.await;
+            info!("persistence writer drained, flushed, and exited");
+        }
+
+        let _ = metrics_handle.await;
+    };
+
+    if tokio::time::timeout(shutdown_timeout, shutdown_work)
+        .await
+        .is_err()
+    {
+        warn!("graceful shutdown timed out after 10s; forcing exit");
     }
     info!("bye");
 }
@@ -267,9 +308,29 @@ async fn metrics_task(
     }
 }
 
-/// Resolves on Ctrl-C.
+/// Resolves on Ctrl-C or SIGTERM.
 async fn shutdown_signal() {
-    if tokio::signal::ctrl_c().await.is_ok() {
-        info!("ctrl-c received");
+    let ctrl_c = async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            info!("ctrl-c received");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+            info!("SIGTERM received");
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
     }
 }

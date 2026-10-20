@@ -74,22 +74,37 @@ async fn run(mut socket: WebSocket, state: AppState) {
     info!(last_seq, "ws: snapshot sent");
 
     // 3. Stream live messages.
+    let mut shutdown = state.shutdown.clone();
+    let send_timeout = Duration::from_secs(5);
     loop {
         tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    let _ = tokio::time::timeout(send_timeout, socket.send(Ws::Close(None))).await;
+                    info!("ws: shutdown signaled; closed socket");
+                    return;
+                }
+            }
             received = rx.recv() => match received {
                 Ok(event) => {
                     if event.seq <= last_seq {
                         // Already covered by the snapshot.
                         continue;
                     }
-                    if socket.send(Ws::Text(event.json.to_string())).await.is_err() {
+                    if tokio::time::timeout(send_timeout, socket.send(Ws::Text(event.json.to_string())))
+                        .await
+                        .map_err(|_| ())
+                        .and_then(|r| r.map_err(|_| ()))
+                        .is_err()
+                    {
+                        warn!("ws: send failed or timed out; closing socket");
                         return;
                     }
                     last_seq = event.seq;
                 }
                 Err(RecvError::Lagged(skipped)) => {
                     warn!(skipped, "ws: client lagged; closing so it can resync");
-                    let _ = socket.send(Ws::Close(None)).await;
+                    let _ = tokio::time::timeout(send_timeout, socket.send(Ws::Close(None))).await;
                     return;
                 }
                 Err(RecvError::Closed) => {
@@ -101,7 +116,7 @@ async fn run(mut socket: WebSocket, state: AppState) {
                 None => return,
                 Some(Ok(Ws::Close(_))) => return,
                 Some(Ok(Ws::Ping(payload))) => {
-                    let _ = socket.send(Ws::Pong(payload)).await;
+                    let _ = tokio::time::timeout(send_timeout, socket.send(Ws::Pong(payload))).await;
                 }
                 Some(Ok(_)) => {}
                 Some(Err(_)) => return,

@@ -62,21 +62,6 @@ pub async fn run(
     let mut batch: Vec<TradeRow> = Vec::with_capacity(BATCH_ROWS);
     let mut flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
     loop {
-        // On shutdown, keep draining the channel until the engine drops its
-        // sender rather than returning immediately: rows already queued are
-        // committed, not silently lost on process exit.
-        if *shutdown.borrow() {
-            while let Ok(row) = rx.try_recv() {
-                batch.push(row);
-                if batch.len() >= BATCH_ROWS {
-                    flush(&pool, &mut batch, &metrics).await;
-                }
-            }
-            flush(&pool, &mut batch, &metrics).await;
-            info!("persistence: flushed and stopped");
-            return;
-        }
-
         // Flush if the elapsed time deadline expired while holding buffered rows
         let now = tokio::time::Instant::now();
         if !batch.is_empty() && now >= flush_deadline {
@@ -104,7 +89,11 @@ pub async fn run(
                     flush_deadline = now + FLUSH_INTERVAL;
                 }
 
-                let sleep_duration = if batch.is_empty() {
+                // If shutdown was requested, yield or sleep briefly and keep waiting
+                // for the engine thread to finish processing queued commands and disconnect.
+                let sleep_duration = if *shutdown.borrow() {
+                    Duration::from_millis(1)
+                } else if batch.is_empty() {
                     Duration::from_millis(10)
                 } else if now >= flush_deadline {
                     Duration::from_millis(0)
@@ -130,9 +119,10 @@ pub async fn run(
                 }
             }
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                // Engine thread dropped its sender (shutdown or exit).
+                // Engine thread finished all queued commands and dropped its sender.
+                // Flush all remaining buffered rows and return.
                 flush(&pool, &mut batch, &metrics).await;
-                info!("persistence: channel closed; flushed and stopped");
+                info!("persistence: channel disconnected, all queued trades flushed and stopped");
                 return;
             }
         }
