@@ -62,6 +62,13 @@ pub const MAX_ORDER_QTY: u64 = MAX_SAFE_INTEGER;
 /// Maximum aggregate quantity allowed at a single price level: capped at [`MAX_SAFE_INTEGER`].
 pub const MAX_LEVEL_QTY: u64 = MAX_SAFE_INTEGER;
 
+/// Maximum order identifier: capped at [`MAX_SAFE_INTEGER`] for JavaScript safe integer interoperability.
+pub const MAX_ORDER_ID: u64 = MAX_SAFE_INTEGER;
+
+/// Maximum distinct price levels allowed per side of the book.
+/// Enforces bounded memory for complete L2 snapshot reconstructions.
+pub const MAX_BOOK_LEVELS_PER_SIDE: usize = 10_000;
+
 /// Why a request was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +81,10 @@ pub enum RejectReason {
     QuantityOutOfRange,
     #[error("price exceeds maximum safe limit")]
     PriceOutOfRange,
+    #[error("order id exceeds maximum safe limit")]
+    OrderIdOutOfRange,
+    #[error("maximum price levels per side exceeded")]
+    BookDepthExceeded,
     #[error("level quantity exceeds maximum safe limit")]
     LevelQuantityOverflow,
     #[error("duplicate order id")]

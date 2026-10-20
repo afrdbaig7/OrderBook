@@ -11,6 +11,6 @@ pub mod types;
 pub use book::{OrderBook, Snapshot};
 pub use price_level::{MatchResult, PriceLevel};
 pub use types::{
-    Event, Fill, Order, OrderId, Price, RejectReason, Side, MAX_LEVEL_QTY, MAX_ORDER_QTY,
-    MAX_PRICE, MAX_SAFE_INTEGER,
+    Event, Fill, Order, OrderId, Price, RejectReason, Side, MAX_BOOK_LEVELS_PER_SIDE,
+    MAX_LEVEL_QTY, MAX_ORDER_ID, MAX_ORDER_QTY, MAX_PRICE, MAX_SAFE_INTEGER,
 };

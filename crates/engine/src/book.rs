@@ -13,7 +13,10 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::price_level::PriceLevel;
-use crate::types::{Event, Order, OrderId, Price, RejectReason, Side, MAX_ORDER_QTY, MAX_PRICE};
+use crate::types::{
+    Event, Order, OrderId, Price, RejectReason, Side, MAX_BOOK_LEVELS_PER_SIDE, MAX_ORDER_ID,
+    MAX_ORDER_QTY, MAX_PRICE,
+};
 
 /// Point-in-time view of the book, computed only by the engine.
 ///
@@ -141,16 +144,14 @@ impl OrderBook {
             .sum()
     }
 
-    /// Sensible upper bound on snapshot levels per side to prevent memory/bandwidth exhaustion.
-    pub const MAX_SNAPSHOT_DEPTH: usize = 10_000;
-
-    /// Depth-limited view of the book; best prices first on each side.
-    /// If `depth == 0`, captures all resting levels up to [`Self::MAX_SNAPSHOT_DEPTH`].
+    /// Snapshot view of the book; best prices first on each side.
+    /// If `depth == 0`, captures the complete book without truncation.
+    /// If `depth > 0`, takes at most `depth` levels per side.
     pub fn snapshot(&self, depth: usize) -> Snapshot {
-        let limit = if depth == 0 {
-            Self::MAX_SNAPSHOT_DEPTH
+        let (bid_limit, ask_limit) = if depth == 0 {
+            (self.bids.len(), self.asks.len())
         } else {
-            depth.min(Self::MAX_SNAPSHOT_DEPTH)
+            (depth.min(self.bids.len()), depth.min(self.asks.len()))
         };
         Snapshot {
             seq: self.seq(),
@@ -158,13 +159,13 @@ impl OrderBook {
                 .bids
                 .iter()
                 .rev()
-                .take(limit)
+                .take(bid_limit)
                 .map(|(&p, l)| (p, l.total_qty()))
                 .collect(),
             asks: self
                 .asks
                 .iter()
-                .take(limit)
+                .take(ask_limit)
                 .map(|(&p, l)| (p, l.total_qty()))
                 .collect(),
         }
@@ -235,6 +236,14 @@ impl OrderBook {
                 Side::Bid => &mut self.bids,
                 Side::Ask => &mut self.asks,
             };
+            if !levels.contains_key(&order.price) && levels.len() >= MAX_BOOK_LEVELS_PER_SIDE {
+                events.push(Event::Reject {
+                    seq: self.take_seq(),
+                    id: order.id,
+                    reason: RejectReason::BookDepthExceeded,
+                });
+                return events;
+            }
             let level = levels.entry(order.price).or_default();
             if level
                 .try_insert(Order {
@@ -274,6 +283,14 @@ impl OrderBook {
     pub fn submit_market(&mut self, id: OrderId, side: Side, qty: u64) -> Vec<Event> {
         let mut events = Vec::new();
 
+        if id.0 > MAX_ORDER_ID {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::OrderIdOutOfRange,
+            });
+            return events;
+        }
         if qty == 0 {
             events.push(Event::Reject {
                 seq: self.take_seq(),
@@ -386,7 +403,9 @@ impl OrderBook {
 
     /// Validation for newly submitted orders (cancel has its own path).
     fn reject_new_order(&self, id: OrderId, price: Price, qty: u64) -> Option<RejectReason> {
-        if qty == 0 {
+        if id.0 > MAX_ORDER_ID {
+            Some(RejectReason::OrderIdOutOfRange)
+        } else if qty == 0 {
             Some(RejectReason::ZeroQuantity)
         } else if qty > MAX_ORDER_QTY {
             Some(RejectReason::QuantityOutOfRange)

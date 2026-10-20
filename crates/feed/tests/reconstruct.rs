@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use engine::{Event, OrderBook, Price, PriceLevel, Side};
+use engine::{Event, Order, OrderBook, Price, PriceLevel, Side};
 use feed::{messages_from_events, ClientBook, Command, Message, SyntheticFeed};
 
 /// Asserts the client's reconstructed book equals the engine's book.
@@ -236,6 +236,69 @@ fn regression_deep_book_snapshot_reconstruction() {
         &complete_client,
         &engine,
         "complete bootstrap preserves deep levels",
+    );
+}
+
+/// Regression test: asserts client depth equals engine depth after boundary changes.
+///
+/// Reproduces the exact failure mode:
+/// Bids: 100, 99, 98.
+/// Client bootstraps via complete snapshot.
+/// Cancel bid 100 -> ladder boundary shifts to 99 and 98.
+/// Asserts client depth == engine depth and ladder displays [99, 98].
+#[test]
+fn client_depth_equals_engine_depth_after_boundary_changes() {
+    let mut engine = OrderBook::new();
+
+    // Populate initial bids: 100, 99, 98
+    for (id, price) in [(1, 100), (2, 99), (3, 98)] {
+        engine.submit_limit(Order {
+            id: engine::OrderId(id),
+            side: Side::Bid,
+            price: Price(price),
+            qty: 10,
+        });
+    }
+
+    assert_eq!(engine.bid_levels().len(), 3);
+
+    // Bootstrap client via complete snapshot (depth 0)
+    let snapshot_msg = Message::from_snapshot(&engine.snapshot(0));
+    let mut client = ClientBook::new();
+    client.apply(&snapshot_msg);
+
+    assert_eq!(client.bids().len(), engine.bid_levels().len());
+    let (ladder_bids, _) = client.ladder(2);
+    assert_eq!(ladder_bids.len(), 2);
+    assert_eq!(ladder_bids[0].0, Price(100));
+    assert_eq!(ladder_bids[1].0, Price(99));
+
+    // Cancel top bid at 100
+    let cancel_events = engine.cancel(engine::OrderId(1));
+    for msg in feed::messages_from_events(&cancel_events) {
+        client.apply(&msg);
+    }
+
+    // Engine bids: 99, 98 (depth = 2)
+    assert_eq!(engine.bid_levels().len(), 2);
+
+    // Client bids: must be 99, 98 (depth = 2)
+    assert_eq!(
+        client.bids().len(),
+        engine.bid_levels().len(),
+        "client depth must equal engine depth after top-level cancel"
+    );
+
+    // Depth-2 ladder must display 99 and 98
+    let (new_ladder_bids, _) = client.ladder(2);
+    assert_eq!(new_ladder_bids.len(), 2);
+    assert_eq!(new_ladder_bids[0].0, Price(99));
+    assert_eq!(new_ladder_bids[1].0, Price(98));
+
+    assert_synced(
+        &client,
+        &engine,
+        "client stays 100% in sync across boundary movements",
     );
 }
 
