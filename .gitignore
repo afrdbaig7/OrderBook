@@ -15,3 +15,7 @@ web/*.tsbuildinfo
 .DS_Store
 .idea/
 .vscode/
+
+# Release verification artifacts
+/dist/
+
