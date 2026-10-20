@@ -11,6 +11,7 @@ import {
 
 import { useCandles, type Candle } from "../hooks/useCandles";
 import type { MarketStore } from "../lib/store";
+import { reconcileHistoryCandles } from "./candleReconcile";
 
 function toBar(candle: Candle): CandlestickData<UTCTimestamp> {
   return {
@@ -43,6 +44,7 @@ export function CandleChart({
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const bucketsRef = useRef<Map<number, Candle>>(new Map());
   const dirtyRef = useRef<Set<number>>(new Set());
+  const latestLiveTsRef = useRef<number>(0);
   const rafRef = useRef<number | undefined>(undefined);
 
   const { candles, error } = useCandles(seconds);
@@ -91,40 +93,14 @@ export function CandleChart({
     };
   }, []);
 
-  // History: merge /candles data, preserving active live bar and pruning outside window.
+  // History: merge /candles data with authoritative reconciliation for settled bars.
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) {
       return;
     }
     const buckets = bucketsRef.current;
-    let maxTs = 0;
-
-    for (const candle of candles) {
-      if (candle.ts > maxTs) {
-        maxTs = candle.ts;
-      }
-      const existing = buckets.get(candle.ts);
-      if (!existing) {
-        buckets.set(candle.ts, candle);
-      } else {
-        // Reconcile: historical settled candle updates past buckets,
-        // but for active/newer bars, merge high/low/volume and preserve latest live close.
-        existing.high = Math.max(existing.high, candle.high);
-        existing.low = Math.min(existing.low, candle.low);
-        existing.volume = Math.max(existing.volume, candle.volume);
-      }
-    }
-
-    // Prune buckets to the fixed rolling history window (e.g. 120s)
-    if (maxTs > 0) {
-      const cutoff = maxTs - seconds * 1000;
-      for (const key of buckets.keys()) {
-        if (key < cutoff) {
-          buckets.delete(key);
-        }
-      }
-    }
+    reconcileHistoryCandles(buckets, candles, latestLiveTsRef.current, seconds);
 
     const data = [...buckets.values()]
       .sort((a, b) => a.ts - b.ts)
@@ -152,6 +128,9 @@ export function CandleChart({
 
     const unsubscribe = store.onTrade((trade) => {
       const ts = Math.floor(trade.ts / 1000) * 1000;
+      if (ts > latestLiveTsRef.current) {
+        latestLiveTsRef.current = ts;
+      }
       const buckets = bucketsRef.current;
       const candle = buckets.get(ts);
       if (candle) {
