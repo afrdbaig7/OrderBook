@@ -36,11 +36,25 @@ impl PriceLevel {
         Self::default()
     }
 
-    /// Appends an order to the back of the queue.
-    pub fn insert(&mut self, order: Order) {
+    /// Appends an order to the back of the queue, checking for arithmetic overflow and safe limits.
+    pub fn try_insert(&mut self, order: Order) -> Result<(), &'static str> {
         debug_assert!(order.qty > 0, "zero-qty order must be rejected upstream");
-        self.total_qty += order.qty;
+        let new_total = self
+            .total_qty
+            .checked_add(order.qty)
+            .ok_or("arithmetic overflow in price level quantity")?;
+        if new_total > crate::types::MAX_LEVEL_QTY {
+            return Err("aggregate price level quantity exceeds maximum safe limit");
+        }
+        self.total_qty = new_total;
         self.orders.push_back(order);
+        Ok(())
+    }
+
+    /// Appends an order to the back of the queue. Panics on arithmetic overflow.
+    pub fn insert(&mut self, order: Order) {
+        self.try_insert(order)
+            .expect("price level insert exceeded numeric capacity");
     }
 
     /// Matches `qty` against this level front-to-back.

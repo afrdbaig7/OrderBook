@@ -49,6 +49,19 @@ pub struct Fill {
     pub qty: u64,
 }
 
+/// Maximum safe integer for exact representation across JavaScript (`Number.MAX_SAFE_INTEGER`),
+/// database storage (`BIGINT`), and arithmetic operations: 2^53 - 1 (9,007,199,254,740,991).
+pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// Maximum allowed price tick: capped at [`MAX_SAFE_INTEGER`].
+pub const MAX_PRICE: u64 = MAX_SAFE_INTEGER;
+
+/// Maximum allowed quantity for a single order: capped at [`MAX_SAFE_INTEGER`].
+pub const MAX_ORDER_QTY: u64 = MAX_SAFE_INTEGER;
+
+/// Maximum aggregate quantity allowed at a single price level: capped at [`MAX_SAFE_INTEGER`].
+pub const MAX_LEVEL_QTY: u64 = MAX_SAFE_INTEGER;
+
 /// Why a request was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +70,12 @@ pub enum RejectReason {
     ZeroQuantity,
     #[error("zero price")]
     ZeroPrice,
+    #[error("quantity exceeds maximum safe limit")]
+    QuantityOutOfRange,
+    #[error("price exceeds maximum safe limit")]
+    PriceOutOfRange,
+    #[error("level quantity exceeds maximum safe limit")]
+    LevelQuantityOverflow,
     #[error("duplicate order id")]
     DuplicateOrderId,
     #[error("unknown cancel")]

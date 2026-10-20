@@ -77,7 +77,7 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("engine".to_string())
         .spawn(move || {
-            while let Ok(command) = cmd_rx.recv() {
+            let mut handle_command = |command: EngineCommand| -> bool {
                 match command {
                     EngineCommand::Feed(command) => {
                         metrics.add_orders_in(1);
@@ -90,22 +90,29 @@ pub fn spawn(
                             let trade = match &event {
                                 Event::Fill {
                                     fill, taker_side, ..
-                                } => Some(TradeRow {
-                                    ts_ms: ts as i64,
-                                    seq: seq as i64,
-                                    price: fill.price.0 as i64,
-                                    qty: fill.qty as i64,
-                                    taker_side: match taker_side {
-                                        Side::Bid => 0,
-                                        Side::Ask => 1,
-                                    },
-                                }),
+                                } => {
+                                    let ts_ms = i64::try_from(ts).unwrap_or(i64::MAX);
+                                    let seq_i64 = i64::try_from(seq).unwrap_or(i64::MAX);
+                                    let price_i64 = i64::try_from(fill.price.0).unwrap_or(i64::MAX);
+                                    let qty_i64 = i64::try_from(fill.qty).unwrap_or(i64::MAX);
+                                    Some(TradeRow {
+                                        ts_ms,
+                                        seq: seq_i64,
+                                        price: price_i64,
+                                        qty: qty_i64,
+                                        taker_side: match taker_side {
+                                            Side::Bid => 0,
+                                            Side::Ask => 1,
+                                        },
+                                    })
+                                }
                                 _ => None,
                             };
 
                             if let Some(row) = &trade {
                                 metrics.inc_trades();
                                 if let Some(tx) = &db_tx {
+                                    // Non-blocking try_send: if the writer task falls
                                     // behind, the trade is dropped and counted.
                                     // Matching never waits on the DB.
                                     if tx.try_send(row.clone()).is_err() {
@@ -121,6 +128,7 @@ pub fn spawn(
                             // lagging receiver (which we then disconnect).
                             let _ = broadcast.send(Arc::new(ServerEvent { seq, json }));
                         }
+                        true
                     }
                     EngineCommand::Snapshot { depth, respond } => {
                         let snapshot = book.snapshot(depth);
@@ -135,10 +143,25 @@ pub fn spawn(
                         {
                             warn!("snapshot requester went away before reply");
                         }
+                        true
                     }
-                    EngineCommand::Shutdown => break,
+                    EngineCommand::Shutdown => false,
+                }
+            };
+
+            while let Ok(command) = cmd_rx.recv() {
+                if !handle_command(command) {
+                    break;
                 }
             }
+
+            // Drain any remaining queued commands before dropping db_tx
+            while let Ok(command) = cmd_rx.try_recv() {
+                if !handle_command(command) {
+                    break;
+                }
+            }
+
             // Dropping `db_tx` here closes the persistence channel, which
             // tells the writer task to flush and exit.
         })
