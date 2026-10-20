@@ -90,24 +90,48 @@ fn bench_match(c: &mut Criterion) {
     }
 }
 
-/// Cancel one mid-queue resting order (level scan + BTreeMap edge lookup).
+/// Cancel resting orders at front, middle, and back of a level queue.
 /// Metric: one iteration = one `cancel` call.
 fn bench_cancel(c: &mut Criterion) {
     for depth in DEPTHS {
         let template = bid_depth(depth, PER_LEVEL);
-        let target = OrderId(PER_LEVEL + 1); // 2nd order at level 0
         let mut group = c.benchmark_group(format!("cancel_order/depth_{depth}"));
         tune(&mut group, depth);
         group.throughput(Throughput::Elements(1));
-        group.bench_function("single_cancel", |b| {
+
+        // Front of queue (level 0, first order: ID 1)
+        group.bench_function("front_pos", |b| {
             b.iter_batched_ref(
                 || template.clone(),
                 |book| {
-                    book.cancel(target);
+                    book.cancel(OrderId(1));
                 },
                 BatchSize::SmallInput,
             )
         });
+
+        // Middle of queue (level 0, middle order: ID 2)
+        group.bench_function("middle_pos", |b| {
+            b.iter_batched_ref(
+                || template.clone(),
+                |book| {
+                    book.cancel(OrderId(PER_LEVEL / 2));
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        // Back of queue (level 0, last order: ID PER_LEVEL)
+        group.bench_function("back_pos", |b| {
+            b.iter_batched_ref(
+                || template.clone(),
+                |book| {
+                    book.cancel(OrderId(PER_LEVEL));
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
         group.finish();
     }
 }

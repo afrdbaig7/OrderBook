@@ -54,11 +54,14 @@ estimate `[low  median  high]`; **median** is what we track.
 
 ### `match_sweep` — one marketable limit draining the whole ask side
 
-| Depth (levels) | Qty swept | Median | Per maker filled |
-|---|---|---|---|
-| 10 | 400 | 4.686 µs | 11.7 ns |
-| 1,000 | 40,000 | 382.03 µs | 9.6 ns |
-| 100,000 | 4,000,000 | 75.746 ms | 18.9 ns |
+Each level holds 4 maker orders of quantity 10 (total quantity = `depth * 40`; maker count = `depth * 4`).
+"Per maker filled" divides median sweep time by the number of maker orders filled (not by quantity).
+
+| Depth (levels) | Makers filled | Qty swept | Median | Per maker filled |
+|---|---|---|---|---|
+| 10 | 40 | 400 | 4.686 µs | 117.2 ns |
+| 1,000 | 4,000 | 40,000 | 382.03 µs | 95.5 ns |
+| 100,000 | 400,000 | 4,000,000 | 75.746 ms | 189.4 ns |
 
 ### `cancel_order` — one cancel against a prebuilt book
 
@@ -256,7 +259,7 @@ Observed cost centres:
 | Path | Cost | Reading |
 |---|---|---|
 | `insert` (resting limit) | 255 ns → 542 ns (10 → 100k levels) | BTreeMap descent + index insert; grows with tree height/cache misses |
-| `match_sweep` | ~10–19 ns **per maker** | linear fill/index-purge/delta emission, already cheap |
+| `match_sweep` | ~95–189 ns **per maker filled** (~10–19 ns/qty) | linear fill/index-purge/delta emission, cache-efficient VecDeque consumption |
 | `cancel` | 378 ns → 4.86 µs (10 → 100k levels) | `VecDeque` O(n) removal + index + BTreeMap, cache-bound at depth |
 | server event path | ≈470 ns/event at 2.1 M events/s incl. JSON encode | serialization is a visible but small share |
 
@@ -265,7 +268,7 @@ Observed cost centres:
 | Candidate | Verdict | Why |
 |---|---|---|
 | O(1) cancel (slab/indexed list) | **Not applied** | Cancel is not the bottleneck: mixed-workload cancel p99 is 1.1 µs, and the 100k-level case is far beyond this demo's ~50-level book. Real complexity not justified by the data. |
-| Cached best bid/ask | **Not applied** | `match_sweep` is already 10–19 ns/maker; no measurement shows the tree-edge lookup dominating. |
+| Cached best bid/ask | **Not applied** | `match_sweep` is already 95–189 ns/maker; no measurement shows the tree-edge lookup dominating. |
 | Reusable fill buffers | **Not applied** | No profile shows `Vec<Fill>` allocation as a hotspot; percentiles are already sub-2 µs. |
 | Faster hasher (`ahash`) | **Not applied** | The index lookup only shows up in the deep-book cancel case, which is off the main path. |
 
@@ -289,13 +292,19 @@ probe complete messages=298185 trades=84413 deltas=98570 errors=0
 
 **0 errors, sequence-contiguous, synced** for the full 60 s (exit code 0).
 
-## End-to-end Latency Sweep
+## Post-Match Event Delivery Latency (Local Loopback)
 
-What is measured: the server stamps each trade with `ts = now_ms()` at engine
-time; `e2e_latency` compares that against its own clock on receipt. Because
-server and reader share one host and loopback, this is **feed → engine →
-broadcast → WebSocket → reader receive** with client JSON-parse cost included.
-It is **localhost loopback latency, not Internet or exchange-grade latency**.
+**Measurement Scope:** The server stamps each trade with `ts = now_ms()` in the
+engine thread immediately after matching has produced the trade event. The
+`e2e_latency` harness records receipt time on its own clock and subtracts `trade.ts`.
+
+> **Accounting Boundary:** This benchmark strictly measures **post-match event delivery latency**
+> (engine event emission → JSON serialization → broadcast channel → WebSocket transmission → client TCP receive & JSON parse).
+> It **excludes** feed scheduling, command queuing, and engine matching time.
+>
+> **Timestamp Resolution:** The harness relies on integer millisecond timestamps (`as_millis()`).
+> Reported latencies of `0 ms` denote transit under 1 millisecond (< 1 ms), not instantaneous delivery.
+> The harness does not claim sub-millisecond precision without higher-resolution microsecond instrumentation.
 
 Release binaries, seed 5, 15 s sample per rate, one client:
 
@@ -311,6 +320,11 @@ Reading: latency stays in single-digit milliseconds up to 20,000 orders/s. At
 one subscriber) and the p99 collapses to ~0.8 s — the pipeline, not the engine,
 is the limit. Slow consumers are automatically disconnected so matching
 is never affected.
+
+> **Persistence Overhead & Variability:** In single-run A/B tests with and without database
+> persistence, tiny throughput differences (e.g. ~0.3%) fall well within standard OS scheduling
+> jitter and thermal throttling variance. Claims of negligible persistence overhead require
+> multi-run statistical summaries (mean ± stddev).
 
 ### Reproduce
 

@@ -156,32 +156,46 @@ async fn main() {
         }
     }
 
-    let elapsed = start.elapsed();
-    let elapsed_s = elapsed.as_secs_f64().max(1e-9);
+    let producer_elapsed = start.elapsed();
+    let producer_elapsed_s = producer_elapsed.as_secs_f64().max(1e-9);
 
     // Stop feeding; engine drains queued commands then exits, dropping its
     // persistence sender so the writer flushes its tail and returns.
     drop(cmd_tx);
     let _ = engine.join();
+    let engine_elapsed = start.elapsed();
+    let engine_elapsed_s = engine_elapsed.as_secs_f64().max(1e-9);
+
     let _ = shutdown_tx.send(true);
     if let Some(task) = db_task {
         let _ = task.await;
     }
+    let persist_elapsed = start.elapsed();
+    let persist_elapsed_s = persist_elapsed.as_secs_f64().max(1e-9);
 
     let snap = metrics.snapshot();
     println!(
-        "persist_load: elapsed_ms={:.1} commands={} events={} trades={} \
-         commands_per_sec={:.0} events_per_sec={:.0} trades_per_sec={:.0}",
-        elapsed.as_secs_f64() * 1000.0,
+        "persist_load: [producer]    elapsed_ms={:.1} commands={} commands_per_sec={:.0}",
+        producer_elapsed.as_secs_f64() * 1000.0,
         commands,
-        snap.events_out,
-        snap.trades,
-        commands as f64 / elapsed_s,
-        snap.events_out as f64 / elapsed_s,
-        snap.trades as f64 / elapsed_s,
+        commands as f64 / producer_elapsed_s,
     );
     println!(
-        "persist_load: persisted_rows={} persistence_drops={} feed_drops={}",
-        snap.persisted_rows, snap.persistence_drops, snap.feed_drops
+        "persist_load: [engine]      elapsed_ms={:.1} events={} trades={} \
+         commands_per_sec={:.0} events_per_sec={:.0} trades_per_sec={:.0}",
+        engine_elapsed.as_secs_f64() * 1000.0,
+        snap.events_out,
+        snap.trades,
+        commands as f64 / engine_elapsed_s,
+        snap.events_out as f64 / engine_elapsed_s,
+        snap.trades as f64 / engine_elapsed_s,
+    );
+    println!(
+        "persist_load: [persistence] elapsed_ms={:.1} persisted_rows={} persisted_per_sec={:.0} persistence_drops={} feed_drops={}",
+        persist_elapsed.as_secs_f64() * 1000.0,
+        snap.persisted_rows,
+        snap.persisted_rows as f64 / persist_elapsed_s,
+        snap.persistence_drops,
+        snap.feed_drops,
     );
 }

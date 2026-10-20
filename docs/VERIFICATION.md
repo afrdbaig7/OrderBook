@@ -94,17 +94,15 @@ cargo run --locked -p server --bin ws_probe -- --url ws://127.0.0.1:5173/ws --se
 
 ---
 
-## 4. Visual Dashboard Verification
+## 4. Web Dashboard Visual Verification
 
-The dashboard was loaded and rendered in headless Google Chrome at `1400x900` resolution against the live container stack:
-
-![Live Dashboard](dashboard.png)
+Visual and interactive validation was conducted in headless Google Chrome at `1400x900` resolution against the live container stack (see screenshot referenced in [README.md](../README.md)):
 
 * **Live Status Pill:** Green active connection indicator.
 * **Header Statistics:** Live calculation of Mid ($100,156.5$), Spread ($17$), Last Trade ($100,148$), and contiguous Sequence numbers ($3,382,703$).
-* **Order Book Ladder:** Visual depth bars with cumulative sizing, separating bids (green) and asks (red) around the spread.
-* **Trade Tape:** Real-time trade stream displaying price, size, taker side, and execution timestamp.
-* **Candle Chart:** Interactive TradingView Lightweight Charts rendering historical and live 1-second candlestick bars.
+* **Order Book Ladder:** Visual depth bars with cumulative sizing, separating bids (green) and asks (red) around the spread. Display bounded to top 20 levels while maintaining deep L2 book state.
+* **Trade Tape:** Real-time trade stream displaying price, size, taker side, and execution timestamp, filtered to strictly accepted trades.
+* **Candle Chart:** Interactive TradingView Lightweight Charts rendering historical and live 1-second candlestick bars, bounded to a rolling 120s window.
 
 ---
 
@@ -114,18 +112,22 @@ The dashboard was loaded and rendered in headless Google Chrome at `1400x900` re
 ```bash
 cargo test --workspace --locked
 ```
-Across all workspace crates, the test suite executes **56 passing tests** (0 failed):
-* **`engine::order_book`:** 25 passed; 0 failed (FIFO execution, price-time priority, cancel handling, duplicate order ID rejection).
-* **`engine::price_level`:** 13 passed; 0 failed (linked-list operations, partial fills, order removal).
-* **`engine::properties` (`proptest`):** 1 passed (100 randomized multi-operation sequences checking book invariants).
-* **`feed::protocol`:** 4 passed; 0 failed (gap detection, snapshot resync, client state recovery).
-* **`feed::reconstruct`:** 4 passed; 0 failed (JSON wire pipeline reconstruction).
-* **`feed::wire`:** 7 passed; 0 failed (schema validation, roundtrip serialization).
-* **`server::e2e`:** 1 passed; 0 failed (live server streaming, rate limiting bounds, 24h candle limits).
-* **`server::persistence`:** 1 passed; 0 failed. When run without `TEST_DATABASE_URL` (e.g. in CI without Docker), this test returns early and skips database queries, allowing offline workspace tests to stay green. Active database assertions are verified via dedicated live execution (see §5.2).
+Across all workspace crates, the test suite executes **66 passing tests** (0 failed):
+* **`engine::order_book`:** 25 passed; 0 failed (FIFO execution, price-time priority, cancel handling, duplicate order ID rejection; see [`crates/engine/src/book.rs`](../crates/engine/src/book.rs)).
+* **`engine::price_level`:** 13 passed; 0 failed (`VecDeque` FIFO queue operations, partial fills, order removal; see [`crates/engine/src/price_level.rs`](../crates/engine/src/price_level.rs)).
+* **`engine::properties` (`proptest`):** 1 passed (10,000 randomized multi-operation sequences checking book invariants against `proptest_config(cases: 10_000)`; see [`crates/engine/tests/properties.rs`](../crates/engine/tests/properties.rs)).
+* **`engine::bounds`:** 6 passed; 0 failed (numeric overflow prevention, `MAX_SAFE_INTEGER` bounds, level aggregate quantity limits; see [`crates/engine/tests/bounds.rs`](../crates/engine/tests/bounds.rs)).
+* **`engine::reference` (`proptest`):** 1 passed (1,000 cases comparing randomized sequences against an independent naive reference matcher; see [`crates/engine/tests/reference.rs`](../crates/engine/tests/reference.rs)).
+* **`feed::protocol`:** 4 passed; 0 failed (gap detection, snapshot resync, client state recovery; see [`crates/feed/src/protocol.rs`](../crates/feed/src/protocol.rs)).
+* **`feed::reconstruct`:** 6 passed; 0 failed (JSON wire pipeline reconstruction, deep book snapshot reconstruction regression test, and candidate pool memory soak test; see [`crates/feed/tests/reconstruct.rs`](../crates/feed/tests/reconstruct.rs)).
+* **`feed::wire`:** 7 passed; 0 failed (schema validation, roundtrip serialization; see [`crates/feed/src/wire.rs`](../crates/feed/src/wire.rs)).
+* **`server::e2e`:** 2 passed; 0 failed (live server streaming, rate limiting bounds, 24h candle limits, and slow-client eviction with reconnection recovery; see [`crates/server/tests/e2e.rs`](../crates/server/tests/e2e.rs)).
+* **`server::shutdown`:** 1 passed; 0 failed (strictly ordered shutdown with slow writer and queued engine commands; see [`crates/server/tests/shutdown.rs`](../crates/server/tests/shutdown.rs)).
+* **`server::persistence`:** 2 passed; 0 failed (deterministic same-millisecond candle ordering tie-break by sequence, and partial-batch flush timer; see [`crates/server/tests/persistence.rs`](../crates/server/tests/persistence.rs)). When run without `TEST_DATABASE_URL` (e.g. in CI without Docker), this test suite skips database queries, allowing offline workspace tests to stay green. Active database assertions are verified via dedicated live execution (see §5.2).
 
 ### 5.2 Database-Backed Candle Boundary & Persistence Flush Tests
 Executed with `TEST_DATABASE_URL=postgres://orderbook:orderbook@localhost:5434/orderbook` against an active TimescaleDB container instance:
+* **Deterministic Sequence Tie-Break:** Asserts identical-timestamp differently priced trades produce deterministic `open` and `close` ordered by `seq` rather than timestamp alone (see [`crates/server/tests/persistence.rs`](../crates/server/tests/persistence.rs)).
 * **Half-Open Inclusion/Exclusion:** Asserts `[t0, t1)` includes `t0` and strictly excludes `t1`.
 * **Subsequent Interval:** Asserts `[t1, t1 + 1000)` excludes prior bucket `t0` and includes `t1`.
 * **Empty Window:** Asserts `[t0, t0)` returns HTTP 200 with an empty JSON array `[]`.
@@ -143,7 +145,7 @@ cd web
 npm test
 npm run build
 ```
-* **Vitest:** 2 test suites passed, 20 of 20 protocol and store unit tests passed (`protocol.test.ts`, `store.test.ts`). These verify the wire protocol sequence reconstruction and reactive store state management independently of browser DOM rendering.
+* **Vitest:** 2 test suites passed, 28 of 28 unit tests passed ([`web/src/lib/protocol.test.ts`](../web/src/lib/protocol.test.ts), [`web/src/lib/store.test.ts`](../web/src/lib/store.test.ts)). These test runtime wire schema validation, integer bounds, duplicate/stale trade side effect suppression, and book gap handling.
 * **Vite Build:** Produced optimized production bundle (`dist/index.html` 2.83 kB, `dist/assets/index-*.js` 314.58 kB gzip: 100.68 kB) in 834 ms.
 
 ---

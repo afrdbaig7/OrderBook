@@ -222,12 +222,9 @@ A publicly accessible browser demo can be approached via two distinct architectu
 
 ## Demonstration
 
-A verified capture of the live running dashboard is rendered below:
+The full stack is verified operating under sustained synthetic load at 5,000 orders/s with TimescaleDB continuous OHLCV aggregation and real-time WebSocket market data updates. Detailed verification logs, health metrics, and inspection captures are documented in [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
-![Order Book Dashboard](docs/dashboard.png)
-
-* Verified live at 5,000 orders/s with continuous OHLCV continuous aggregates and sub-millisecond WebSocket updates.
-* To launch and explore the live interface locally, run `docker compose up -d` and open <http://localhost:5173>.
+To launch and explore the live interface locally, run `docker compose up -d` and open <http://localhost:5173>.
 
 ---
 
