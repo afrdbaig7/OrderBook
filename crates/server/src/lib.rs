@@ -66,8 +66,8 @@ pub struct Args {
     /// Seed for the deterministic synthetic feed.
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
-    /// Book levels returned in each bootstrap snapshot (default 1000, 0 for full book up to 10000).
-    #[arg(long = "snapshot-depth", default_value_t = 1000)]
+    /// Book levels returned in each bootstrap snapshot (default 0 for complete book within enforced limits, or positive depth limit).
+    #[arg(long = "snapshot-depth", default_value_t = 0)]
     pub snapshot_depth: usize,
     /// Postgres/TimescaleDB DSN. Persistence is disabled when unset.
     #[arg(long, env = "DATABASE_URL")]
@@ -76,15 +76,53 @@ pub struct Args {
     #[arg(long, env = "ADMIN_TOKEN")]
     pub admin_token: Option<String>,
     /// If true, POST /feed-rate is publicly accessible without authentication.
-    #[arg(long = "allow-public-feed-rate", default_value_t = false)]
+    #[arg(
+        long = "allow-public-feed-rate",
+        env = "ALLOW_PUBLIC_FEED_RATE",
+        default_value_t = false
+    )]
     pub allow_public_feed_rate: bool,
     /// Capacity of the WebSocket broadcast ring buffer (default 65536).
     #[arg(long = "broadcast-capacity", default_value_t = BROADCAST_CAPACITY)]
     pub broadcast_capacity: usize,
 }
 
+impl Args {
+    /// Validates startup parameters against strict operating bounds.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("port must be greater than 0".to_string());
+        }
+        if self.feed_rate == 0 || self.feed_rate > 100_000 {
+            return Err(format!(
+                "feed-rate must be between 1 and 100,000 orders/s, got {}",
+                self.feed_rate
+            ));
+        }
+        if self.broadcast_capacity == 0 || self.broadcast_capacity > 1_000_000 {
+            return Err(format!(
+                "broadcast-capacity must be between 1 and 1,000,000, got {}",
+                self.broadcast_capacity
+            ));
+        }
+        if self.snapshot_depth > engine::MAX_BOOK_LEVELS_PER_SIDE {
+            return Err(format!(
+                "snapshot-depth cannot exceed maximum book levels ({}), got {}",
+                engine::MAX_BOOK_LEVELS_PER_SIDE,
+                self.snapshot_depth
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Runs the server until Ctrl-C, then shuts down gracefully.
 pub async fn run(args: Args) {
+    if let Err(err) = args.validate() {
+        eprintln!("Configuration error: {err}");
+        std::process::exit(1);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -208,9 +246,21 @@ pub async fn run(args: Args) {
         info!("feed task stopped");
 
         // 2. Tell the engine to finish its queued commands and exit
-        let _ = cmd_tx.send(EngineCommand::Shutdown);
-        let _ = engine_handle.join();
-        info!("engine thread finished all queued commands and exited");
+        loop {
+            match cmd_tx.try_send(EngineCommand::Shutdown) {
+                Ok(()) => break,
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+            }
+        }
+        let join_res = tokio::task::spawn_blocking(move || engine_handle.join()).await;
+        if let Err(e) = join_res {
+            warn!("engine thread join failed: {e}");
+        } else {
+            info!("engine thread finished all queued commands and exited");
+        }
 
         // 3. Let persistence writer drain until disconnected then flush
         if let Some(handle) = db_handle {

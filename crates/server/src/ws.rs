@@ -44,38 +44,59 @@ impl Drop for ClientGuard {
 
 async fn run(mut socket: WebSocket, state: AppState) {
     let _guard = ClientGuard::new(state.metrics.clone());
+    let mut shutdown = state.shutdown.clone();
+    let send_timeout = Duration::from_secs(5);
 
     // 1. Subscribe first so the snapshot cannot race ahead of live deltas.
     let mut rx = state.broadcast.subscribe();
 
-    // 2. Ask the engine thread for a consistent snapshot.
+    // 2. Ask the engine thread for a consistent snapshot with bounded timeout and shutdown awareness.
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<SnapshotReply>();
     let command = EngineCommand::Snapshot {
         depth: state.snapshot_depth,
         respond: reply_tx,
     };
-    if !send_with_backoff(&state, command).await {
-        warn!("engine channel full; closing socket before snapshot");
+    if !send_with_backoff(&state, command, &mut shutdown).await {
+        warn!("engine channel full or shutting down; closing socket before snapshot");
+        let _ = tokio::time::timeout(send_timeout, socket.send(Ws::Close(None))).await;
         return;
     }
 
-    let SnapshotReply { seq, json } = match reply_rx.await {
-        Ok(reply) => reply,
-        Err(_) => {
-            warn!("engine dropped snapshot request; closing socket");
+    let SnapshotReply { seq, json } = tokio::select! {
+        _ = shutdown.changed() => {
+            if *shutdown.borrow() {
+                info!("ws: shutdown signaled before snapshot; closed socket");
+                let _ = tokio::time::timeout(send_timeout, socket.send(Ws::Close(None))).await;
+            }
             return;
+        }
+        res = tokio::time::timeout(send_timeout, reply_rx) => match res {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => {
+                warn!("engine dropped snapshot request; closing socket");
+                return;
+            }
+            Err(_) => {
+                warn!("engine snapshot request timed out; closing socket");
+                return;
+            }
         }
     };
     let mut last_seq = seq;
 
-    if socket.send(Ws::Text(json.to_string())).await.is_err() {
+    let send_snapshot = tokio::select! {
+        _ = shutdown.changed() => {
+            let _ = tokio::time::timeout(send_timeout, socket.send(Ws::Close(None))).await;
+            return;
+        }
+        res = tokio::time::timeout(send_timeout, socket.send(Ws::Text(json.to_string()))) => res,
+    };
+    if send_snapshot.is_err() || send_snapshot.unwrap().is_err() {
         return;
     }
     info!(last_seq, "ws: snapshot sent");
 
     // 3. Stream live messages.
-    let mut shutdown = state.shutdown.clone();
-    let send_timeout = Duration::from_secs(5);
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
@@ -126,15 +147,26 @@ async fn run(mut socket: WebSocket, state: AppState) {
 }
 
 /// Sends a command to the engine, retrying briefly if the channel is full.
-/// Short backoff avoids blocking the async runtime on a synchronous channel.
-async fn send_with_backoff(state: &AppState, mut command: EngineCommand) -> bool {
+/// Short backoff avoids blocking the async runtime on a synchronous channel,
+/// and yields or exits if shutdown is signaled.
+async fn send_with_backoff(
+    state: &AppState,
+    mut command: EngineCommand,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
     for attempt in 0..10u32 {
+        if *shutdown.borrow() {
+            return false;
+        }
         match state.cmd_tx.try_send(command) {
             Ok(()) => return true,
             Err(crossbeam_channel::TrySendError::Full(returned)) => {
                 command = returned;
                 if attempt < 9 {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    tokio::select! {
+                        _ = shutdown.changed() => return false,
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                    }
                 }
             }
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => return false,

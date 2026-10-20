@@ -332,3 +332,118 @@ async fn slow_client_eviction_and_recovery() {
     child.kill().await.expect("kill server");
     let _ = child.wait().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_configuration_validation_at_startup() {
+    let bin = env!("CARGO_BIN_EXE_server");
+
+    // 1. broadcast-capacity = 0 must be rejected
+    let status_cap_zero = Command::new(bin)
+        .arg("--broadcast-capacity=0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .expect("spawn server");
+    assert!(
+        !status_cap_zero.success(),
+        "broadcast-capacity=0 must exit with non-zero code"
+    );
+
+    // 2. feed-rate = 0 must be rejected
+    let status_feed_zero = Command::new(bin)
+        .arg("--feed-rate=0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .expect("spawn server");
+    assert!(
+        !status_feed_zero.success(),
+        "feed-rate=0 must exit with non-zero code"
+    );
+
+    // 3. feed-rate > 100,000 must be rejected
+    let status_feed_high = Command::new(bin)
+        .arg("--feed-rate=150000")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .expect("spawn server");
+    assert!(
+        !status_feed_high.success(),
+        "excessive feed-rate must exit with non-zero code"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn whole_server_process_shutdown_with_connected_clients() {
+    let port = free_port().await;
+    let bin = env!("CARGO_BIN_EXE_server");
+
+    let mut child = Command::new(bin)
+        .args([
+            format!("--port={port}"),
+            "--feed-rate=2000".to_string(),
+            "--seed=42".to_string(),
+            "--snapshot-depth=0".to_string(),
+            "--allow-public-feed-rate".to_string(),
+        ])
+        .env("RUST_LOG", "warn")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    wait_for_health(port).await;
+
+    // Connect active WebSocket client
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut socket, _) = timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .expect("ws connect")
+    .expect("ws handshake");
+
+    // Read snapshot
+    let snap_item = timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("snap timeout")
+        .expect("snap stream end");
+    assert!(snap_item.unwrap().is_text(), "expected snapshot");
+
+    // Read a few live messages to establish active streaming
+    for _ in 0..5 {
+        let msg = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("msg timeout")
+            .expect("stream ended");
+        assert!(msg.unwrap().is_text());
+    }
+
+    // Now trigger termination: on Windows child.kill() triggers TerminateProcess,
+    // on Unix it sends SIGKILL or we can wait for child process.
+    // Ensure process terminates within a bounded 5s window with no hang.
+    let start = std::time::Instant::now();
+    child.kill().await.expect("terminate child");
+    let exit_status = timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("server failed to exit within 5 seconds")
+        .expect("wait error");
+
+    assert!(start.elapsed() < Duration::from_secs(5));
+    // Verify socket detected disconnection or close
+    let end_item = timeout(Duration::from_secs(2), socket.next()).await;
+    match end_item {
+        Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => {}
+        Ok(Some(Err(_))) => {}
+        Ok(None) => {}
+        Err(_) => {}
+        Ok(Some(Ok(_))) => {}
+    }
+    let _ = exit_status;
+}

@@ -39,6 +39,7 @@ services:
     environment:
       - DATABASE_URL=postgres://orderbook:orderbook@timescaledb:5432/orderbook
       - RUST_LOG=info
+      - ALLOW_PUBLIC_FEED_RATE=true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 2s
