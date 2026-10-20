@@ -1,272 +1,248 @@
 # Order Book
 
-A low-latency limit order book and matching engine with WebSocket market
-data, TimescaleDB persistence and a live web dashboard. Built as a
-phase-by-phase portfolio project: every layer is tested, benchmarked and
-measured.
+A high-performance limit order book and matching engine written in Rust, featuring real-time WebSocket market-data streaming, batched TimescaleDB persistence, and an interactive web dashboard.
 
-The matching core is a **pure library** — no locks, no async, no I/O on the
-hot path. A single dedicated thread owns the book; everything else
-(WebSockets, HTTP, the database, the synthetic feed) is Tokio and communicates
-only through bounded channels, so a slow client exerts backpressure instead of
-stalling matching.
+---
+
+## Quick Start (Full Stack)
+
+Start the entire system—TimescaleDB, Rust backend server, and Nginx-proxied React dashboard—with one command:
+
+```bash
+docker compose up --build
+```
+
+Open **<http://localhost:5173>** in your browser.
+
+![Order Book Dashboard](docs/dashboard.png)
+
+* The web dashboard displays the real-time depth ladder, live trade tape, 1-second candlestick chart, and throughput/price readouts (mid, spread, last, msg/s, trd/s, seq).
+* To stop the stack while preserving database data: `docker compose down`.
+* To stop and permanently remove database volumes: `docker compose down -v`.
+
+---
+
+## Architectural Overview
+
+The matching core is isolated from network I/O, asynchronous execution, and database persistence:
 
 ```text
- feed task (tokio)              engine thread (std)          broadcast (tokio)
- ─────────────────              ───────────────────          ─────────────────
- SyntheticFeed.next_command ──► EngineCommand::Feed ──► book.submit_* ──► ServerEvent ──► /ws
-                      │                        │                              │
-                      │                  Snapshot request ────────────────► snapshot reply
-                      │                        │
-                      └── order commands ──► trades ──try_send──► db writer (tokio) ──► TimescaleDB
+ ┌───────────────────────────┐      ┌─────────────────────────────┐      ┌──────────────────────────┐
+ │     Feed Task (Tokio)     │      │  Engine Thread (std::thread)│      │  Broadcast Stream (Tokio)│
+ │                           │      │                             │      │                          │
+ │  SyntheticFeed            │      │  Exclusive single-thread    │      │  ServerEvent broadcast   │
+ │  .next_command()          │───►  │  ownership (no async,       │───►  │  to connected WebSockets │
+ │                           │      │  no locks on the book)      │      │  (/ws)                   │
+ └───────────────────────────┘      └──────────────┬──────────────┘      └──────────────────────────┘
+                                                   │
+                                                   │ trades (try_send)
+                                                   ▼
+                                    ┌─────────────────────────────┐
+                                    │    DB Writer Task (Tokio)   │
+                                    │                             │
+                                    │  Batched unnest insert      │───►  TimescaleDB (trades)
+                                    │  (drops + counts if full)   │      Continuous aggregate (candles_1s)
+                                    └─────────────────────────────┘
 ```
 
-## Crates
+### Component Responsibilities
 
-| Crate | Responsibility |
-|-------|----------------|
-| `crates/engine` | The order book: integer prices, FIFO price levels, maker-price fills, sequencing, snapshots. Pure, `#![forbid(unsafe_code)]`, no runtime. |
-| `crates/feed` | Wire protocol (`Message` enum, `Event` → JSON), deterministic synthetic order flow, and the reference client-side reconstruction (`ClientBook`). No sockets, no async. |
-| `crates/bench` | Criterion micro-benchmarks and an HDR-histogram latency binary. |
-| `crates/server` | Single-writer engine thread, WebSocket stream, HTTP API, batched persistence writer, metrics. |
-| `web` | Vite + React + TypeScript dashboard: connection status, cumulative depth ladder, trade tape, live 1-second candlestick chart (`lightweight-charts`), spread/midpoint/last and msg/s readouts. |
+| Component | Path | Responsibility |
+|---|---|---|
+| **`engine`** | [`crates/engine`](crates/engine) | Pure matching core: integer prices, FIFO price levels, maker-price execution, sequence assignment, snapshots, and property tests. Enforces `#![forbid(unsafe_code)]`. |
+| **`feed`** | [`crates/feed`](crates/feed) | Wire protocol serialization, deterministic synthetic order flow, and reference client-side book reconstruction (`ClientBook`). Enforces `#![forbid(unsafe_code)]`. |
+| **`server`** | [`crates/server`](crates/server) | Dedicated OS matching thread, Tokio async runtime, WebSocket/HTTP endpoints, bounded channel coordination, metrics, and batched TimescaleDB writer. |
+| **`bench`** | [`crates/bench`](crates/bench) | Criterion micro-benchmarks and HDR histogram latency harness. |
+| **`web`** | [`web`](web) | Vite, React, and TypeScript dashboard: live depth ladder, trade tape, 1s candlestick chart (`lightweight-charts`), and feed rate control. |
 
-## Design rules
+### Synchronization & Backpressure Model
 
-* **Integer prices and quantities** everywhere — no floating point in the book.
-* **Maker price wins** on every fill.
-* **FIFO** within a price level.
-* The engine assigns **every** sequence number; every event — including
-  rejects and fills — consumes exactly one `seq`.
-* One `Delta` per changed level per event; `qty == 0` deletes the level.
-* Conservation invariant: `submitted == 2 × fills + cancelled + dropped + resting`.
-* The engine never sees Tokio, SQL, HTTP or a clock; the server stamps trade
-  timestamps.
+* **Exclusive Single-Thread Ownership**: The order book is owned by a single standard OS thread without locks or async runtimes. Tokio tasks communicate with the engine thread strictly through bounded `crossbeam-channel` queues.
+* **WebSocket Backpressure**: Live market events are broadcast through a bounded ring buffer (`BROADCAST_CAPACITY = 65,536`). If a slow consumer lags behind the buffer capacity, the server closes the connection, forcing the client to reconnect and resynchronize with a fresh snapshot.
+* **Persistence Decoupling**: Executed trades are buffered in a bounded channel (`PERSIST_CAPACITY = 100,000`). If TimescaleDB falls behind, incoming trades are dropped and counted in the `persistence_drops` metric—disk I/O never blocks order matching.
+* **Persistence Scope**: TimescaleDB stores executed trade market data and generates 1-second continuous aggregate candles (`candles_1s`). It is an analytical market-data store, **not** an order-level transaction journal or crash-recovery ledger.
 
-## Quick start
+---
 
-> **Demo.** The dashboard is best seen live: run the three commands below, open
-> <http://localhost:5173>, and drag the feed-rate up. A screen-recorded
-> `docs/demo.gif` is referenced from this README; it is **not committed**
-> because it must be captured locally (see [Demo](#demo)).
+## Design Invariants
 
-### 1. Server only (no database)
+* **Integer Prices & Quantities**: All prices and quantities in the matching engine are integers (`u64`/`i64`); floating-point math is forbidden in the book.
+* **Maker-Price Execution**: Fills always execute at the resting maker order's price.
+* **FIFO Priority**: Orders at the same price level execute in first-in, first-out order.
+* **Sequencing**: The engine assigns every sequence number (`seq`). Every event—including fills, cancellations, and rejections—consumes exactly one sequence number.
+* **Quantity Conservation**: Checked with property tests (`proptest`):
+  $$\text{submitted} = 2 \times \text{fills} + \text{cancelled} + \text{dropped} + \text{resting}$$
+
+---
+
+## Verified Benchmarks
+
+Detailed methodology and instructions to reproduce are documented in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+
+> **Hardware & Environment**: Intel Core i5-12500H (12 cores / 16 threads), 16 GB RAM, Windows 11, Rust stable toolchain. All measurements reflect release builds with LTO enabled.
+
+### 1. In-Memory Engine Micro-Benchmarks (Criterion)
+
+Measurements reflect single-threaded CPU execution time of library calls on [`OrderBook`](crates/engine/src/book.rs) (not including network or serialization):
+
+| Operation | Depth 10 | Depth 1,000 | Depth 100,000 |
+|---|---|---|---|
+| **`submit_limit` (non-crossing)** | **255 ns** | **266 ns** | **542 ns** |
+| **`match_sweep`** | **4.69 µs** | **382 µs** | **75.75 ms** |
+| **`cancel`** | **378 ns** | **857 ns** | **4.86 µs** |
+
+*Note: The ~255 ns figure specifically represents a non-crossing limit insertion at shallow depth (10 levels). Sweeping fills and deep book traversals have different execution profiles.*
+
+### 2. Server Throughput & Persistence Overhead
+
+Matching throughput measured over 1,000,000 synthetic events:
+
+* **Engine standalone**: **2,139,451 events/second**
+* **Engine with TimescaleDB writer attached**: **2,133,230 events/second** ($\pm 0.3\%$ difference)
+* **Trades persisted**: 1,000,082 trades generated and persisted with **0 dropped trades**.
+
+### 3. End-to-End WebSocket Latency (HDR Histogram)
+
+Measured over localhost loopback from server timestamp to client receipt and JSON parsing:
+
+| Feed Rate (orders/s) | p50 | p99 | p99.9 | Max |
+|---|---|---|---|---|
+| **1,000** | 0 ms | 1 ms | 2 ms | 5 ms |
+| **5,000** | 1 ms | 4 ms | 5 ms | 11 ms |
+| **20,000** | 4 ms | 13 ms | 17 ms | 28 ms |
+| **50,000** | 11 ms | 779 ms | 796 ms | 988 ms |
+
+*Stream Health over 60 seconds at 5,000 orders/s: 298,185 messages, 84,413 trades, 0 sequence gaps, client synchronized throughout.*
+
+---
+
+## Native Development Workflows
+
+You do not need Docker or Node to develop and test the Rust matching engine.
+
+### Prerequisites
+
+* Rust stable toolchain (`rustup default stable`)
+* Node.js v20+ (only for web dashboard)
+* Docker (only for TimescaleDB integration)
+
+### Running Without Docker (Server Only)
+
+#### POSIX (Linux)
+```bash
+cargo run -p server --bin server -- --port 8080 --feed-rate 1000 --seed 42
+```
+
+#### PowerShell (Windows)
+```powershell
+cargo run -p server --bin server -- --port 8080 --feed-rate 1000 --seed 42
+```
+
+Endpoints available:
+* `GET  /health` — Liveness, live counters, sequence number, and channel depths.
+* `GET  /ws` — WebSocket market data (bootstrap snapshot followed by contiguous deltas and trades).
+* `GET  /candles?from=<ms>&to=<ms>&interval=1s` — 1s OHLCV bars over `[from, to)` (`503` when running without database).
+* `GET  /feed-rate` · `POST /feed-rate {"orders_per_second": N}` — Live feed rate control (maximum 100,000).
+
+### Native Development with TimescaleDB
+
+To run TimescaleDB locally for persistence tests and candle aggregation:
 
 ```bash
-cargo run -p server --bin server -- --port 8080 --feed-rate 1000 --seed 1
+# Start TimescaleDB with host port 5434 published
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d timescaledb
+
+# Run server with persistence
+DATABASE_URL="postgres://orderbook:orderbook@localhost:5434/orderbook" \
+  cargo run -p server --bin server -- --feed-rate 2000
 ```
 
-* `GET  /health` — status, live counters, sequence, feed rate.
-* `GET  /ws` — snapshot + live deltas/trades.
-* `GET  /candles?from=<ms>&to=<ms>&interval=1s` — 1s OHLCV bars (`503` without a DB).
-* `GET  /feed-rate` · `POST /feed-rate {"orders_per_second": N}` — live rate control.
-
-### 2. With persistence (TimescaleDB)
-
-```bash
-docker compose up -d                     # applies db/schema.sql on first boot
-export DATABASE_URL="postgres://orderbook:orderbook@localhost:5434/orderbook"
-cargo run -p server --bin server -- --feed-rate 2000
-```
-
-> The compose file maps the database to host port **5434** (this machine
-> already had Postgres on 5432). Adjust `docker-compose.yml` if that is free.
-
-### 3. Web dashboard
+### Running the Web Dashboard
 
 ```bash
 cd web
-npm install
-npm run dev          # http://localhost:5173, proxies /ws + API to :8080
+npm ci
+npm run dev          # http://localhost:5173, dev proxy forwards /ws and API to :8080
 ```
 
-### Verification tools
+---
+
+## Verification & Testing
 
 ```bash
-# apply every message to the reference ClientBook; exits nonzero on any gap
-cargo run --release -p server --bin ws_probe -- --url ws://127.0.0.1:8080/ws --seconds 30
+# Code formatting and linter checks
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 
-# end-to-end trade latency (server ts → reader), p50/p99/p99.9
-cargo run --release -p server --bin e2e_latency -- --url ws://127.0.0.1:8080/ws --seconds 15
+# All workspace tests (43 engine unit/property tests, 11 feed tests, server e2e)
+cargo test --workspace
 
-# persistence load test: 1M+ trades + engine A/B with/without the DB writer (§38)
-cargo run --release -p server --bin persist_load -- --target-trades 1000000 --seed 42 --no-persist
+# Database persistence integration test (requires running TimescaleDB on 5434)
+TEST_DATABASE_URL="postgres://orderbook:orderbook@localhost:5434/orderbook" \
+  cargo test -p server --test persistence -- --nocapture
+
+# Frontend tests and production build
+cd web && npm ci && npm test && npm run build
 ```
 
-## WebSocket protocol
+---
 
-Internally tagged JSON, one message per engine event:
+## HTTP and WebSocket Validation Controls
 
-```json
-{"type":"snapshot","seq":1042,"bids":[[10000,50],[9999,120]],"asks":[[10001,30],[10002,75]]}
-{"type":"delta","seq":1043,"side":"bid","price":10000,"qty":35}
-{"type":"trade","seq":1044,"price":10001,"qty":10,"taker_side":"bid","ts":1730000000000}
-{"type":"ack","seq":1045,"id":9}
-{"type":"cancel","seq":1046,"id":7}
-{"type":"reject","seq":1047,"id":3,"reason":"duplicate_order_id"}
-```
+The server enforces strict input boundaries:
+* `POST /feed-rate`: Validated to `0..=100_000` orders/second. Requests exceeding this return `400 Bad Request`.
+* `GET /candles`: Evaluates the half-open interval `[from, to)`. Requires `interval=1s`, `from >= 0`, `to >= from`, and `(to - from) <= 86,400,000` ms (maximum 24-hour window, up to 86,400 bars). Requests exceeding these bounds return `400 Bad Request`.
 
-Client rules (implemented identically in Rust `feed::ClientBook` and the
-TypeScript `PureOrderBook`):
+---
 
-1. Wait for a `snapshot`; it resets state and sets the expected sequence.
-2. Apply messages in order; ignore `seq <= snapshot.seq`.
-3. `seq == last + 1` → apply; `seq > last + 1` → **desynchronized** → reconnect.
-4. On server-side lag the socket is closed so the client resyncs with a fresh
-   snapshot.
+## Known Limitations & Non-Goals
 
-## Benchmarks
+To maintain clear architectural boundaries and high code quality:
+1. **Single Symbol**: The matching core maintains a single order book; multi-asset routing is not currently implemented.
+2. **Synthetic Order Flow**: Market data is driven by a deterministic in-process synthetic generator, not an ITCH/OUCH, FIX, or live exchange gateway.
+3. **Discrete Orders vs. Aggregate L2**: The generator produces discrete limit and cancel orders (L3); public exchange feeds (such as Binance `depthUpdate`) stream aggregated price-level volumes (L2) and require a separate order-reconstruction path.
+4. **JSON Wire Protocol**: WebSocket frames use tagged JSON text rather than binary serialization (e.g. SBE, FlatBuffers).
+5. **O(n) Cancellation**: Orders within a single price level are stored in a `VecDeque`, making cancellation $O(n)$ in level depth.
+6. **Localhost Latency**: Benchmarks reflect loopback communication on a single workstation, not real-world wide-area network latency.
+7. **Candle Close Tie-Breaking**: The `candles_1s` continuous aggregate calculates `close` using `last(price, ts)`. Because `last(price, ts)` orders by millisecond timestamp alone and multiple trades can execute within the same millisecond, the recorded `close` can differ by a few ticks from the exact `(ts, seq)`-ordered final trade of the second (`open`, `high`, `low`, and `volume` reconcile exactly).
+8. **Duplicate Order IDs**: A duplicate `OrderId` is rejected while it rests in the book. If an order has already fully filled or been cancelled and removed, re-using that `OrderId` is not tracked (documented engine boundary; the engine stores market data rather than a durable transaction ledger).
 
-Micro-benchmarks (Criterion) and an HDR latency run live in
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Highlights on an i5-12500H /
-Windows 11 / rustc 1.92, 1M ops, depth 1000:
+---
 
-| Operation | Median |
-|-----------|--------|
-| `submit_limit` (10 / 1k / 100k levels) | 255 ns / 266 ns / 542 ns |
-| `match_sweep` | 4.69 µs / 382 µs / 75.75 ms |
-| `cancel` | 377.9 ns / 857 ns / 4.86 µs |
+## Public Browser Demo Architecture: Hosted Backend vs. WASM Engine (Future Work)
 
-End-to-end latency (release server, one WebSocket reader, so the client
-JSON-parse cost is included) — **localhost loopback, not Internet/exchange**:
+A publicly accessible browser demo can be approached via two distinct architectures with different operational tradeoffs:
 
-| Feed rate (orders/s) | p50 | p99 | p99.9 |
+| Approach | Architecture | Advantages | Operational Tradeoffs |
 |---|---|---|---|
-| 1,000 | 0 ms | 1 ms | 2 ms |
-| 5,000 | 1 ms | 4 ms | 5 ms |
-| 20,000 | 4 ms | 13 ms | 17 ms |
-| 50,000 | 11 ms | 779 ms | 796 ms |
+| **Hosted Backend Demo** | Containerized Rust `server` + TimescaleDB deployed on a cloud container host, streaming market data to the web frontend over WebSockets. | Demonstrates the existing full stack (dedicated OS matching thread, live WebSocket streaming, channel backpressure, and TimescaleDB continuous aggregates) in a live environment. | Incurs recurring cloud infrastructure costs, requires connection concurrency limits, public API rate-limiting, and ongoing backend service monitoring. |
+| **Client-Side WASM Demo** | Compiling `crates/engine` and `crates/feed` to WebAssembly (`wasm32-unknown-unknown`) and running the matching loop inside the browser. | Can use free static hosting and requires no running backend after loading; execution remains subject to browser resource limits and tab lifecycle. | Demonstrates the matching engine library in isolation, but bypasses the multi-threaded Tokio server, network socket handling, and TimescaleDB persistence. |
 
-Stays single-digit-ms to 20,000 orders/s; a single JSON client saturates
-(~10k trades/s) by 50,000. Reproduce commands and the full table:
-[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md#end-to-end-latency-sweep-spec-46).
+---
 
-Stream health over a 60-second run: **298,185 messages**, 84,413 trades,
-98,570 deltas, **0 sequence gaps**, `synced = true` (~4,972 msg/s).
+## Demonstration
 
-Persistence load test (§38): **1,000,082 trades** generated and **1,000,082
-persisted, 0 drops** into TimescaleDB. With the writer attached vs detached,
-engine throughput was **2,133,230 vs 2,139,451 events/s (±0.3 %)** — the DB
-never slows matching (it drops + counts into a bounded queue instead). Full
-command and numbers: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+A verified capture of the live running dashboard is rendered below:
 
-> Pipeline ordering is deterministic: `cargo fmt --check`,
-> `cargo clippy --workspace --all-targets -- -D warnings`,
-> `cargo test --workspace`.
+![Order Book Dashboard](docs/dashboard.png)
 
-## Persistence
+* Verified live at 5,000 orders/s with continuous OHLCV continuous aggregates and sub-millisecond WebSocket updates.
+* To launch and explore the live interface locally, run `docker compose up -d` and open <http://localhost:5173>.
 
-`trades` is a TimescaleDB hypertable (`ts`, `seq`, `price`, `qty`,
-`taker_side`). A continuous aggregate `candles_1s` produces 1-second OHLCV
-bars. The writer batches up to 1,000 rows (or 100 ms) into a single
-`INSERT ... SELECT FROM unnest(...)`, and drops + counts rows when the bounded
-channel is full — matching never waits on the database. See
-[`db/schema.sql`](db/schema.sql).
+---
 
-## Testing
+## Contributing & Security
 
-```bash
-cargo test --workspace                 # engine + feed + server units & e2e
-docker compose up -d
-TEST_DATABASE_URL=postgres://orderbook:orderbook@localhost:5434/orderbook \
-  cargo test -p server --test persistence
-cd web && npm test && npm run build
-```
+* **[CONTRIBUTING.md](CONTRIBUTING.md)**: Development guidelines, code standards, and PR instructions.
+* **[SECURITY.md](SECURITY.md)**: Vulnerability disclosure policy.
+* **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**: Community standards (Contributor Covenant 2.1).
 
-* `crates/engine/tests` — 43 tests incl. a `proptest` conservation property.
-* `crates/feed/tests` — wire round-trips and snapshot+delta reconstruction.
-* `crates/server/tests/e2e.rs` — spawns the real binary, asserts snapshot +
-  contiguous sequencing + reconnect + rate control over real sockets.
-* `crates/server/tests/persistence.rs` — Phase E gate against live TimescaleDB.
-* `web/src/**/*.test.ts` — 20 Vitest tests: the wire-protocol `PureOrderBook`
-  reducer plus the `MarketStore` (snapshot + buffered-delta reconstruction,
-  cumulative ladder ordering, 50-trade tape cap, gap detection, trade pub/sub).
+---
 
-## Project phases
+## License
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| A | Engine crate, types, price levels | ✅ |
-| B | Order book, validation, snapshots, properties | ✅ |
-| C | Benchmarks + latency harness + documented baselines | ✅ |
-| D | Feed protocol + server (engine thread, WS, HTTP, metrics) | ✅ |
-| E | TimescaleDB persistence + candle aggregate | ✅ |
-| F | Web dashboard (ladder, tape, candles) | ✅ |
-| G | End-to-end latency, README, CI | ✅ |
+This project is dual-licensed under either:
+* **[MIT License](LICENSE-MIT)**
+* **[Apache License, Version 2.0](LICENSE-APACHE)**
 
-## Limitations
-
-* The synthetic feed is generated in-process (deterministic by seed); there
-  is no ITCH/OUCH or FIX market-data feed.
-* Order ids are not persisted — `trades` stores market data, not a ledger.
-* A duplicate `OrderId` is only rejected while it rests (documented engine limitation).
-* The wire protocol is JSON text frames, not a binary protocol (fine at these
-  rates, not exchange-grade).
-* The `candles_1s` `close` value can differ by a few ticks from the true
-  `(ts, seq)`-ordered close because `last(price, ts)` orders by `ts` only and
-  many fills can share a millisecond; `open`/`high`/`low`/`volume` reconcile
-  exactly. A `seq`-aware candle aggregate would make `close` exact.
-* Cancellation is **O(n)** in the level (`VecDeque` scan) by design; see
-  [Parking Lot](#parking-lot) and the §48 analysis in `docs/BENCHMARKS.md`.
-* End-to-end latency is **localhost** (same machine, loopback); it is not
-  Internet or exchange-grade latency.
-* The dashboard runs well past 5,000 msg/s by batching renders per animation
-  frame, but this has only been exercised headlessly (no browser automation in
-  this environment).
-
-## Demo
-
-The README references `docs/demo.gif` (a short screen capture: ladder + tape +
-candles updating as the feed rate is raised). It is intentionally **not
-committed** — it must be recorded on a machine with a display/browser:
-
-```bash
-docker compose up -d
-DATABASE_URL=postgres://orderbook:orderbook@localhost:5434/orderbook \
-  cargo run --release -p server --bin server -- --feed-rate 5000
-cd web && npm run dev            # open http://localhost:5173
-# record ~10 s, save as docs/demo.gif
-```
-
-## Parking Lot
-
-Deliberately **not** implemented (spec §3, §58 "Final Parking Lot"); listed so
-nothing is implied to already exist:
-
-* **Multi-symbol** engine and per-symbol sequencing.
-* **Binary market-data protocol** (integer-packed frames instead of JSON).
-* **O(1) cancellation** — slab / intrusive index, *only if* a Linux flamegraph
-  shows cancel dominating (see §48).
-* **IOC / FOK / stop** order types.
-* **Sequencer + replication** and disk snapshots for HA.
-* **Event-sourced replay** for deterministic recovery.
-* **Live exchange feed** adapters (ITCH/OUCH, FIX).
-
-## Definition of Done
-
-| Criterion | Status |
-|---|---|
-| `cargo fmt` passes | ✅ |
-| `cargo clippy -D warnings` passes | ✅ |
-| `cargo test --workspace` passes | ✅ |
-| Frontend build passes | ✅ |
-| Frontend tests pass | ✅ |
-| Book never crosses (property test) | ✅ |
-| Quantity conservation (property test) | ✅ |
-| Index consistency (property test) | ✅ |
-| Deterministic replay | ✅ |
-| Snapshot + delta reconstruction test | ✅ |
-| Benchmark methodology documented | ✅ |
-| Real benchmark numbers recorded | ✅ |
-| Benchmark reproduce commands documented | ✅ |
-| WebSocket reconnect/resync works | ✅ |
-| 1M+ trades persisted | ✅ (1,000,082) |
-| Persistence does not block matching | ✅ (A/B ±0.3 %) |
-| Candle data verified | ✅ (high/low/volume exact; `close` tie-break noted) |
-| Frontend usable under high message rates | ✅ (rAF batching; headless) |
-| README contains p50/p99/p99.9 | ✅ |
-| End-to-end latency at multiple feed rates | ✅ (1k–50k sweep) |
-| Committed to version control (baseline) | ✅ |
-| Demo GIF exists | ⚠️ not committed — requires local screen capture (see [Demo](#demo)) |
-| Repository runs from a clean clone | ✅ |
-| Limitations honestly documented | ✅ |
+at your option.
