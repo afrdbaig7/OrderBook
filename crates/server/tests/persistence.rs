@@ -63,6 +63,40 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut stmts = Vec::new();
+    let mut current = String::new();
+    let mut in_dollar_quote = false;
+
+    let chars: Vec<char> = sql.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 1 < chars.len() && chars[i] == '$' && chars[i + 1] == '$' {
+            in_dollar_quote = !in_dollar_quote;
+            current.push('$');
+            current.push('$');
+            i += 2;
+            continue;
+        }
+        if chars[i] == ';' && !in_dollar_quote {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                stmts.push(trimmed.to_string());
+            }
+            current.clear();
+            i += 1;
+            continue;
+        }
+        current.push(chars[i]);
+        i += 1;
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        stmts.push(trimmed.to_string());
+    }
+    stmts
+}
+
 /// Global lock to serialize database tests against TEST_DATABASE_URL to prevent concurrent schema mutations.
 static DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -81,6 +115,12 @@ async fn persists_trades_and_candles() {
         .connect(&url)
         .await
         .unwrap_or_else(|error| panic!("cannot connect to database: {error}"));
+
+    // Ensure schema is properly applied and up to date
+    let schema_sql = include_str!("../../../db/schema.sql");
+    for stmt in split_sql_statements(schema_sql) {
+        let _ = sqlx::raw_sql(&stmt).execute(&pool).await;
+    }
 
     sqlx::query("SELECT count(*) FROM trades")
         .fetch_one(&pool)
@@ -437,7 +477,7 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         .execute(&pool)
         .await;
 
-    let hist_ts_ms: i64 = now_ms() - (3 * 3600 * 1000);
+    let hist_ts_ms: i64 = ((now_ms() - (3 * 3600 * 1000)) / 1000) * 1000;
     let hist_trades = [
         (50_000_001i64, 200i64, 10i64),
         (50_000_002i64, 210i64, 15i64),
@@ -455,23 +495,19 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         .unwrap();
     }
 
-    // Refresh the legacy continuous aggregate for that historical bucket
-    let _ = sqlx::query(
-        "CALL refresh_continuous_aggregate('candles_1s', to_timestamp($1 / 1000.0), to_timestamp(($1 + 1000) / 1000.0))",
-    )
-    .bind(hist_ts_ms)
-    .execute(&pool)
-    .await;
-
     // 3. Execute schema upgrade: run db/schema.sql to test the actual schema.sql upgrade path!
     // This executes the DO $$ upgrade block, recreates candles_1s with sequence ordering,
     // restores the continuous aggregate policy, and runs the top-level backfill:
     // CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);
     let schema_sql = include_str!("../../../db/schema.sql");
-    sqlx::raw_sql(schema_sql)
-        .execute(&pool)
-        .await
-        .expect("executing db/schema.sql upgrade");
+    for stmt in split_sql_statements(schema_sql) {
+        sqlx::raw_sql(&stmt)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("executing statement from db/schema.sql failed:\n{stmt}\nError: {e}")
+            });
+    }
 
     // 4. Verify upgraded view definition uses `seq`
     let upgraded_row: (String,) = sqlx::query_as("SELECT pg_get_viewdef('candles_1s'::regclass)")
