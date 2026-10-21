@@ -1,6 +1,6 @@
 # Order Book
 
-A Rust matching-engine learning project with a live dashboard, property and differential tests, and reproducible performance experiments. Built with AI assistance; I’m looking for feedback on matching semantics, stream reconstruction, and failure handling.
+An experimental Rust matching engine with a synthetic market-data dashboard. Built to explore deterministic execution semantics, stream reconstruction, failure recovery, and real-time continuous aggregation.
 
 ---
 
@@ -12,14 +12,30 @@ Start the entire system—TimescaleDB, Rust backend server, and Nginx-proxied Re
 docker compose up --build
 ```
 
-Open **<http://localhost:5173>** in your browser.
+Open **<http://127.0.0.1:5173>** in your browser.
 
 ![Order Book Dashboard](docs/dashboard.png)
 
 * The web dashboard displays the real-time depth ladder, live trade tape, 1-second candlestick chart, and throughput/price readouts (mid, spread, last, msg/s, trd/s, seq).
-* In the local Docker stack, public feed rate control is enabled (`ALLOW_PUBLIC_FEED_RATE=true`) so you can experiment with different workloads directly from the web header.
+* In the local Docker stack, public feed rate control is enabled (`ALLOW_PUBLIC_FEED_RATE=true`) so you can experiment with different workloads directly from the web header. Published ports are bound strictly to `127.0.0.1` for local safety.
 * To stop the stack while preserving database data: `docker compose down`.
 * To stop and permanently remove database volumes: `docker compose down -v`.
+
+---
+
+## Runnable Library Example
+
+The matching engine core ([`crates/engine`](crates/engine)) is a pure synchronous library with zero async, locking, or network dependencies. You can run the standalone matching example without starting Docker or the web interface:
+
+```bash
+cargo run -p engine --example basic_matching
+```
+
+This demonstrates:
+1. Submitting resting limit orders (bids and asks).
+2. Submitting an aggressive crossing limit order (triggering maker-price execution and resting remainder).
+3. Cancelling an open resting order.
+4. Capturing a complete point-in-time L2 snapshot with monotonically assigned sequence numbers.
 
 ---
 
@@ -50,7 +66,7 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 
 | Component | Path | Responsibility |
 |---|---|---|
-| **`engine`** | [`crates/engine`](crates/engine) | Pure matching core: integer prices, FIFO price levels, maker-price execution, sequence assignment, snapshots, and property tests. Enforces `#![forbid(unsafe_code)]`. |
+| **`engine`** | [`crates/engine`](crates/engine) | Pure matching core: integer prices, FIFO price levels, maker-price execution, sequence assignment, complete snapshots, and property tests. Enforces `#![forbid(unsafe_code)]`. |
 | **`feed`** | [`crates/feed`](crates/feed) | Wire protocol serialization, deterministic synthetic order flow, and reference client-side book reconstruction (`ClientBook`). Enforces `#![forbid(unsafe_code)]`. |
 | **`server`** | [`crates/server`](crates/server) | Dedicated OS matching thread, Tokio async runtime, WebSocket/HTTP endpoints, bounded channel coordination, metrics, and batched TimescaleDB writer. |
 | **`bench`** | [`crates/bench`](crates/bench) | Criterion micro-benchmarks and HDR histogram latency harness. |
@@ -70,6 +86,7 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 * **Integer Prices & Quantities**: All prices and quantities in the matching engine are integers (`u64`/`i64`); floating-point math is forbidden in the book.
 * **Maker-Price Execution**: Fills always execute at the resting maker order's price.
 * **FIFO Priority**: Orders at the same price level execute in first-in, first-out order.
+* **Complete Bootstrap Snapshots**: Bootstrap snapshots return all resting levels up to `MAX_BOOK_LEVELS_PER_SIDE = 10,000`. Visual depth truncation is managed strictly on the client.
 * **Sequencing**: The engine assigns every sequence number (`seq`). Every event—including fills, cancellations, and rejections—consumes exactly one sequence number.
 * **Quantity Conservation**: Checked with property tests (`proptest`):
   $$\text{submitted} = 2 \times \text{fills} + \text{cancelled} + \text{dropped} + \text{resting}$$
@@ -78,21 +95,25 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 
 ## Verified Benchmarks
 
-Detailed methodology and instructions to reproduce are documented in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+Detailed methodology, workload descriptions, and instructions to reproduce are documented in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-> **Hardware & Environment**: Intel Core i5-12500H (12 cores / 16 threads), 16 GB RAM, Windows 11, Rust stable toolchain. All measurements reflect release builds with LTO enabled.
+> **Hardware & Environment**: Intel Core i5-12500H (12 cores / 16 threads), 16 GB RAM, Windows 11, Rust stable toolchain. Baseline measurements reflect commit `8d235ec` with LTO enabled.
 
 ### 1. In-Memory Engine Micro-Benchmarks (Criterion)
 
-Measurements reflect single-threaded CPU execution time of library calls on [`OrderBook`](crates/engine/src/book.rs) (not including network or serialization):
+Measurements reflect single-threaded CPU execution time of library calls on [`OrderBook`](crates/engine/src/book.rs) (excluding network, serialization, and disk I/O):
 
 | Operation | Depth 10 | Depth 1,000 | Depth 100,000 |
 |---|---|---|---|
-| **`submit_limit` (non-crossing)** | **255 ns** | **266 ns** | **542 ns** |
+| **`submit_limit` (non-crossing batch)** | **255 ns** | **266 ns** | **542 ns** |
 | **`match_sweep`** | **4.69 µs** | **382 µs** | **75.75 ms** |
-| **`cancel`** | **378 ns** | **857 ns** | **4.86 µs** |
+| **`cancel` (short queue)** | **378 ns** | **857 ns** | **4.86 µs** |
 
-*Note: The ~255 ns figure specifically represents a non-crossing limit insertion at shallow depth (10 levels). Sweeping fills and deep book traversals have different execution profiles.*
+* **Workload Scope**: The ~255 ns figure represents the *average amortized insertion cost* of adding a growing batch of 1,000 distinct price levels starting from depth 10.
+* **Queue Length Cancellation**: Orders at a single price level are stored in a `VecDeque`, requiring an $O(n)$ search to cancel mid-queue. Measured scaling across queue depths (via `bench_cancel_queue_length`):
+  * 4 orders/level: **~350 ns**
+  * 50 orders/level: **~580 ns**
+  * 500 orders/level: **~2.8 µs**
 
 ### 2. Server Throughput & Persistence Overhead
 
@@ -102,9 +123,9 @@ Matching throughput measured over 1,000,000 synthetic events:
 * **Engine with TimescaleDB writer attached**: **2,133,230 events/second** ($\pm 0.3\%$ difference)
 * **Trades persisted**: 1,000,082 trades generated and persisted with **0 dropped trades**.
 
-### 3. End-to-End WebSocket Latency (HDR Histogram)
+### 3. End-to-End WebSocket Delivery Latency (HDR Histogram)
 
-Measured over localhost loopback from server timestamp to client receipt and JSON parsing:
+Measured over localhost loopback from server event timestamp (immediately post-match) to client receipt and JSON parsing (excludes engine matching and inbound network transit):
 
 | Feed Rate (orders/s) | p50 | p99 | p99.9 | Max |
 |---|---|---|---|---|
@@ -170,25 +191,53 @@ npm run dev          # http://localhost:5173, dev proxy forwards /ws and API to 
 
 ## Verification & Testing
 
+The test suite explicitly establishes what is verified versus what is out of scope:
+
+| Check | What it establishes |
+|---|---|
+| **HTML loads** | Static frontend assets are delivered correctly through reverse proxy |
+| **Browser renders** | UI components mount, initialize store, and render depth ladder |
+| **Sequence probe passes** | WebSocket stream is contiguous; zero sequence gaps or dropped deltas |
+| **Client state matches engine** | Complete bootstrap snapshot + delta reconstruction preserves full depth across boundary changes |
+| **Graceful shutdown test passes** | Shutdown signal drains queues, closes sockets with `Close` frames, and exits with code 0 |
+
+### Automated Commands
+
 ```bash
 # Code formatting and linter checks
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 
-# All workspace tests (43 engine unit/property tests, 11 feed tests, server e2e)
+# All workspace tests (44 engine tests, 14 feed tests, server e2e + graceful shutdown)
 cargo test --workspace
 
-# Database persistence integration test (requires running TimescaleDB on 5434)
+# Database persistence & continuous aggregate migration test (requires TimescaleDB on 5434)
 TEST_DATABASE_URL="postgres://orderbook:orderbook@localhost:5434/orderbook" \
   cargo test -p server --test persistence -- --nocapture
 
 # Frontend tests and production build
 cd web && npm ci && npm test && npm run build
+
+# Automated full-stack container smoke test (runs in isolated test project, preserves demo data)
+# POSIX:
+./scripts/smoke_test.sh
+# Windows PowerShell:
+.\scripts\smoke_test.ps1
 ```
 
 ---
 
-## HTTP and WebSocket Validation Controls
+## Database Migration & Upgrades
+
+The schema defines continuous aggregates using `first(price, seq)` and `last(price, seq)` with real-time continuous aggregation enabled (`timescaledb.materialized_only = false`).
+
+To upgrade an existing installation created under earlier timestamp-based definitions:
+
+```bash
+psql "$DATABASE_URL" -f db/migrations/002_rebuild_candles_with_sequence.sql
+```
+
+Applying `db/schema.sql` directly also detects whether `candles_1s` lacks sequence ordering and rebuilds the view and refresh policy automatically without dropping historical raw trade data.
 
 The server enforces strict input boundaries:
 * `POST /feed-rate`: Validated to `0..=100_000` orders/second. Requests exceeding this return `400 Bad Request`.

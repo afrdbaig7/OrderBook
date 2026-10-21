@@ -121,31 +121,33 @@ Across all workspace crates, the test suite executes **71 passing tests** (0 fai
 * **`feed::protocol`:** 4 passed; 0 failed (gap detection, snapshot resync, client state recovery; see [`crates/feed/src/protocol.rs`](../crates/feed/src/protocol.rs)).
 * **`feed::reconstruct`:** 7 passed; 0 failed (JSON wire pipeline reconstruction, deep book snapshot reconstruction regression test, client-depth-equals-engine-depth boundary test, and candidate pool memory soak test; see [`crates/feed/tests/reconstruct.rs`](../crates/feed/tests/reconstruct.rs)).
 * **`feed::wire`:** 7 passed; 0 failed (schema validation, roundtrip serialization; see [`crates/feed/src/wire.rs`](../crates/feed/src/wire.rs)).
-* **`server::e2e`:** 4 passed; 0 failed (live server streaming, CLI startup validation, whole-server process shutdown with active clients, and slow-client eviction with reconnection recovery; see [`crates/server/tests/e2e.rs`](../crates/server/tests/e2e.rs)).
+* **`server::e2e`:** 5 passed on Windows / 6 on Unix (live server stream, CLI startup validation including snapshot-depth rejection, forced process kill, slow client eviction/recovery, bootstrap snapshot depth exceeding 20 levels, and Unix graceful SIGTERM shutdown; see [`crates/server/tests/e2e.rs`](../crates/server/tests/e2e.rs)).
 * **`server::shutdown`:** 1 passed; 0 failed (strictly ordered shutdown with slow writer and queued engine commands; see [`crates/server/tests/shutdown.rs`](../crates/server/tests/shutdown.rs)).
-* **`server::persistence`:** 2 passed; 0 failed (deterministic same-millisecond candle ordering tie-break by sequence, and partial-batch flush timer; see [`crates/server/tests/persistence.rs`](../crates/server/tests/persistence.rs)). When run without `TEST_DATABASE_URL` (e.g. in CI without Docker), this test suite skips database queries, allowing offline workspace tests to stay green. Active database assertions are verified via dedicated live execution (see §5.2).
+* **`server::persistence`:** 3 passed; 0 failed (deterministic candle sequence tie-break, partial-batch flush timer, and legacy continuous aggregate rebuild migration; see [`crates/server/tests/persistence.rs`](../crates/server/tests/persistence.rs)). When run without `TEST_DATABASE_URL` (e.g. in CI without Docker), this test suite skips database queries, allowing offline workspace tests to stay green. Active database assertions are verified via dedicated live execution (see §5.2).
 
 ### 5.2 Database-Backed Candle Boundary & Persistence Flush Tests
 Executed with `TEST_DATABASE_URL=postgres://orderbook:orderbook@localhost:5434/orderbook` against an active TimescaleDB container instance:
 * **Deterministic Sequence Tie-Break:** Asserts identical-timestamp differently priced trades produce deterministic `open` and `close` ordered by `seq` rather than timestamp alone (see [`crates/server/tests/persistence.rs`](../crates/server/tests/persistence.rs)).
+* **Continuous Aggregate Migration:** Tears down view to simulate legacy `first(price, ts)` state, runs `db/migrations/002_rebuild_candles_with_sequence.sql`, and asserts definition upgrades to `seq` with `materialized_only = false`.
 * **Half-Open Inclusion/Exclusion:** Asserts `[t0, t1)` includes `t0` and strictly excludes `t1`.
 * **Subsequent Interval:** Asserts `[t1, t1 + 1000)` excludes prior bucket `t0` and includes `t1`.
 * **Empty Window:** Asserts `[t0, t0)` returns HTTP 200 with an empty JSON array `[]`.
 * **Maximum 24h Window:** Asserts interval of exactly 86,400,000 ms returns HTTP 200.
 * **Exceeding 24h Window:** Asserts interval of 86,400,001 ms returns HTTP 400 Bad Request.
-* **Partial-Batch Flush Contract:** Halts feed, injects a partial burst of trades ($< 1,000$ rows), waits for the elapsed-time flush window, and asserts `persisted_rows` increments by the exact count without waiting for a full 1,000-row batch. (Note: this integration test demonstrates that sub-1,000-row batches flush automatically via the elapsed timer rather than waiting indefinitely for `BATCH_ROWS`; due to test sleep margins, it demonstrates eventual elapsed flushing rather than an exact hard real-time sub-millisecond 100 ms precision guarantee).
+* **Partial-Batch Flush Contract:** Halts feed, injects a partial burst of trades ($< 1,000$ rows), waits for the elapsed-time flush window, and asserts `persisted_rows` increments by the exact count without waiting for a full 1,000-row batch.
 
 ### 5.3 Automated Container Quickstart Smoke Test
 Automated end-to-end container testing is provided via executable test scripts:
 * **POSIX:** [`scripts/smoke_test.sh`](../scripts/smoke_test.sh)
 * **PowerShell:** [`scripts/smoke_test.ps1`](../scripts/smoke_test.ps1)
 
-The smoke test builds the full stack from source via `docker compose up --build -d`, awaits service health, and asserts:
-1. Nginx static reverse proxy delivery of the React dashboard (`HTTP 200`).
+The smoke test runs in an **isolated test project** (`-p ob-smoke-*`) using a dedicated test compose configuration ([`docker-compose.smoke.yml`](../docker-compose.smoke.yml)) to guarantee developer demo data is never deleted. It binds to port 15173, registers cleanup traps *before* stack launch, and verifies:
+1. Static asset delivery through Nginx reverse proxy.
 2. Feed rate control mutation and validation via reverse-proxied `POST /feed-rate`.
 3. Active trade persistence row growth in TimescaleDB over a measured interval.
-4. Continuous aggregate 1-second candle queries returning valid JSON arrays.
-5. Clean container and volume teardown (`docker compose down -v`).
+4. Continuous aggregate 1-second candle queries returning populated, non-empty OHLCV rows with valid prices and volumes.
+5. WebSocket reverse proxy delivery and stream sequence contiguity via [`scripts/ws_probe.mjs`](../scripts/ws_probe.mjs).
+6. Clean isolated teardown of only smoke test containers and volumes.
 
 ### 5.4 Code Quality & Linters
 * **Formatting:** `cargo fmt --all --check` returned exit code 0.
