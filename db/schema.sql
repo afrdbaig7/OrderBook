@@ -29,12 +29,12 @@ DO $$
 DECLARE
     view_def TEXT;
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'candles_1s') THEN
-        SELECT pg_get_viewdef('candles_1s'::regclass) INTO view_def;
+    IF to_regclass('candles_1s') IS NOT NULL OR to_regclass('public.candles_1s') IS NOT NULL THEN
+        SELECT pg_get_viewdef(COALESCE(to_regclass('candles_1s'), to_regclass('public.candles_1s'))) INTO view_def;
         IF view_def NOT LIKE '%seq%' THEN
             RAISE NOTICE 'Upgrading candles_1s continuous aggregate to sequence-ordered open/close...';
             PERFORM remove_continuous_aggregate_policy('candles_1s', if_exists => true);
-            DROP MATERIALIZED VIEW candles_1s CASCADE;
+            DROP MATERIALIZED VIEW IF EXISTS candles_1s CASCADE;
         ELSE
             ALTER MATERIALIZED VIEW candles_1s SET (timescaledb.materialized_only = false);
         END IF;
