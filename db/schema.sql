@@ -74,8 +74,6 @@ BEGIN
                 schedule_interval => INTERVAL '1 second',
                 if_not_exists     => TRUE);
 
-            -- Backfill historical trades so pre-existing data prior to policy window is restored
-            CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);
         ELSE
             ALTER MATERIALIZED VIEW candles_1s SET (timescaledb.materialized_only = false);
         END IF;
@@ -90,3 +88,7 @@ SELECT add_continuous_aggregate_policy('candles_1s',
     end_offset        => INTERVAL '1 second',
     schedule_interval => INTERVAL '1 second',
     if_not_exists     => TRUE);
+
+-- Explicit top-level historical backfill. Must be executed outside any DO $$
+-- or transaction blocks to satisfy TimescaleDB procedural execution requirements.
+CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);

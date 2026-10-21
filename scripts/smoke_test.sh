@@ -21,8 +21,8 @@ SMOKE_PORT="${SMOKE_PORT:-15173}"
 export SMOKE_PORT
 
 # 2. Dependency validation
-if ! command -v node >/dev/null 2>&1 && ! command -v cargo >/dev/null 2>&1; then
-    echo "Error: Required WebSocket probe dependencies missing: 'node' or 'cargo' must be available in PATH" >&2
+if ! command -v node >/dev/null 2>&1; then
+    echo "Error: Node.js (v20+) is required to run container smoke tests" >&2
     exit 1
 fi
 
@@ -115,13 +115,6 @@ if [ "$CANDLES_VERIFIED" != "true" ]; then
 fi
 
 echo "==> Check 5: WebSocket streaming through Nginx reverse proxy..."
-if command -v node >/dev/null 2>&1; then
-    node scripts/ws_probe.mjs "$WS_URL" 25
-elif command -v cargo >/dev/null 2>&1; then
-    cargo run -p server --bin ws_probe -- --url "$WS_URL" --count 25
-else
-    echo "Error: Required WebSocket probe dependencies missing (node or cargo required)" >&2
-    exit 1
-fi
+node --experimental-websocket scripts/ws_probe.mjs "$WS_URL" 25
 
 echo "==> All isolated container smoke test checks passed successfully!"

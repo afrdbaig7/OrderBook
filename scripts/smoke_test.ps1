@@ -20,8 +20,8 @@ $randomId = Get-Random -Minimum 1000 -Maximum 9999
 $projectName = "ob-smoke-$randomId"
 
 # Dependency validation
-if (-not (Get-Command node -ErrorAction SilentlyContinue) -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    Write-Error "Required WebSocket probe dependencies missing: 'node' or 'cargo' must be available in PATH"
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Error "Required dependency missing: Node.js (v20+) must be available in PATH to run container smoke tests"
     exit 1
 }
 
@@ -111,18 +111,9 @@ try {
     }
 
     Write-Host "==> Check 5: WebSocket streaming through Nginx reverse proxy..."
-    if (Get-Command node -ErrorAction SilentlyContinue) {
-        node scripts/ws_probe.mjs $wsUrl 25
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "WebSocket probe failed with exit code $LASTEXITCODE"
-        }
-    } elseif (Get-Command cargo -ErrorAction SilentlyContinue) {
-        cargo run -p server --bin ws_probe -- --url $wsUrl --count 25
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "WebSocket probe failed with exit code $LASTEXITCODE"
-        }
-    } else {
-        Write-Error "Required WebSocket probe dependencies missing (node or cargo required)"
+    node --experimental-websocket scripts/ws_probe.mjs $wsUrl 25
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "WebSocket probe failed with exit code $LASTEXITCODE"
     }
 
     Write-Host "==> All isolated container smoke test checks passed successfully!"

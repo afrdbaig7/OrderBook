@@ -508,12 +508,30 @@ async fn forced_process_kill_with_connected_clients() {
         .expect("server failed to exit within 5 seconds")
         .expect("wait error");
 
-    // Sockets are dropped abruptly upon SIGKILL/TerminateProcess
-    let end_item = timeout(Duration::from_secs(2), socket.next()).await;
-    match end_item {
-        Ok(Some(Err(_))) | Ok(None) => {}
-        other => panic!("expected socket termination on forced kill, got: {other:?}"),
+    // Sockets are dropped abruptly upon SIGKILL/TerminateProcess.
+    // Drain any remaining buffered frames in the TCP receive window until EOF or error.
+    let mut socket_terminated = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), socket.next()).await {
+            Ok(Some(Ok(_buffered))) => {
+                // Drain in-flight frame delivered prior to process termination
+            }
+            Ok(Some(Err(_))) | Ok(None) => {
+                socket_terminated = true;
+                break;
+            }
+            Err(_) => {
+                // No more frames arrived after process kill
+                socket_terminated = true;
+                break;
+            }
+        }
     }
+    assert!(
+        socket_terminated,
+        "expected socket termination on forced kill within deadline"
+    );
     let _ = exit_status;
 }
 

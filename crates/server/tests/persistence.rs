@@ -463,20 +463,15 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
     .execute(&pool)
     .await;
 
-    // 3. Execute migration: 002_rebuild_candles_with_sequence.sql
-    // This drops the old view, recreates it WITH NO DATA, restores policy, and runs:
+    // 3. Execute schema upgrade: run db/schema.sql to test the actual schema.sql upgrade path!
+    // This executes the DO $$ upgrade block, recreates candles_1s with sequence ordering,
+    // restores the continuous aggregate policy, and runs the top-level backfill:
     // CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);
-    let migration_sql =
-        include_str!("../../../db/migrations/002_rebuild_candles_with_sequence.sql");
-    for statement in migration_sql.split(';') {
-        let trimmed = statement.trim();
-        if !trimmed.is_empty() {
-            sqlx::query(trimmed)
-                .execute(&pool)
-                .await
-                .unwrap_or_else(|e| panic!("migration statement failed: {trimmed}\nError: {e}"));
-        }
-    }
+    let schema_sql = include_str!("../../../db/schema.sql");
+    sqlx::raw_sql(schema_sql)
+        .execute(&pool)
+        .await
+        .expect("executing db/schema.sql upgrade");
 
     // 4. Verify upgraded view definition uses `seq`
     let upgraded_row: (String,) = sqlx::query_as("SELECT pg_get_viewdef('candles_1s'::regclass)")
