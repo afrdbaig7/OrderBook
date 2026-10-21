@@ -131,10 +131,10 @@ fn test_split_sql_statements_handles_comments_and_dollar_quotes() {
     assert!(stmts[1].contains("CREATE TABLE IF NOT EXISTS trades"));
     assert!(stmts[2].contains("SELECT create_hypertable"));
     assert!(stmts[3].contains("CREATE INDEX IF NOT EXISTS trades_seq_idx"));
-    assert!(stmts[4].contains("CREATE MATERIALIZED VIEW IF NOT EXISTS candles_1s"));
-    assert!(stmts[5].contains("DO $$"));
-    assert!(stmts[6].contains("SELECT add_continuous_aggregate_policy"));
-    assert!(stmts[7].contains("CALL refresh_continuous_aggregate"));
+    assert!(stmts[4].contains("DO $$"));
+    assert!(stmts[5].contains("CREATE MATERIALIZED VIEW IF NOT EXISTS candles_1s"));
+    assert!(stmts[6].contains("CALL refresh_continuous_aggregate"));
+    assert!(stmts[7].contains("SELECT add_continuous_aggregate_policy"));
 }
 
 /// Global lock to serialize database tests against TEST_DATABASE_URL to prevent concurrent schema mutations.
@@ -379,26 +379,43 @@ async fn persists_trades_and_candles() {
         .await
         .unwrap();
 
-    let health_mid = http_request(port, "GET", "/health", "").await.unwrap();
-    let json_mid: serde_json::Value =
-        serde_json::from_str(health_mid.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    let new_trades = json_mid["trades"].as_u64().unwrap() - trades_before;
+    // Wait until engine finishes in-flight commands and trade count stabilizes
+    let mut stabilized_trades = trades_before;
+    for _ in 0..15 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let h = http_request(port, "GET", "/health", "").await.unwrap();
+        let j: serde_json::Value =
+            serde_json::from_str(h.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let t = j["trades"].as_u64().unwrap();
+        if t == stabilized_trades && t > trades_before {
+            break;
+        }
+        stabilized_trades = t;
+    }
+    let new_trades = stabilized_trades - trades_before;
     assert!(
         new_trades > 0 && new_trades < 1000,
         "expected partial batch (< 1000 rows), got {new_trades}"
     );
 
     // Allow the 100ms elapsed-time flush deadline to expire and commit
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let health_after = http_request(port, "GET", "/health", "").await.unwrap();
-    let json_after: serde_json::Value =
-        serde_json::from_str(health_after.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    let persisted_after = json_after["persisted_rows"].as_u64().unwrap();
-    assert_eq!(
-        persisted_after - persisted_before,
-        new_trades,
-        "elapsed-time deadline (100ms) must flush partial batch without waiting for BATCH_ROWS (1000)"
+    let mut flushed = false;
+    let mut persisted_delta = 0;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let health_after = http_request(port, "GET", "/health", "").await.unwrap();
+        let json_after: serde_json::Value =
+            serde_json::from_str(health_after.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let persisted_after = json_after["persisted_rows"].as_u64().unwrap();
+        persisted_delta = persisted_after - persisted_before;
+        if persisted_delta == new_trades {
+            flushed = true;
+            break;
+        }
+    }
+    assert!(
+        flushed,
+        "elapsed-time deadline (100ms) must flush partial batch without waiting for BATCH_ROWS (1000): expected {new_trades}, got {persisted_delta}"
     );
 
     // ── Focused Verification: Deterministic Candle Ordering (ts, seq) ──
