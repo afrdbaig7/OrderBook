@@ -517,6 +517,15 @@ async fn forced_process_kill_with_connected_clients() {
     let _ = exit_status;
 }
 
+/// Integration test: graceful process shutdown on SIGTERM (Unix only).
+///
+/// Verifies process-level signal handling:
+/// 1. The server handles SIGTERM cooperatively and exits with status code 0 within deadline.
+/// 2. Active WebSocket connections receive a clean protocol Close frame before termination.
+///
+/// Scope note: This end-to-end process test does not attach a live database or assert persisted
+/// trade counts; component-level queue draining and zero trade loss to persistence are independently
+/// verified in `crates/server/tests/shutdown.rs`.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn graceful_process_shutdown_via_sigterm() {
@@ -570,7 +579,7 @@ async fn graceful_process_shutdown_via_sigterm() {
     let kill_res = unsafe { libc::kill(pid, libc::SIGTERM) };
     assert_eq!(kill_res, 0, "kill(SIGTERM) should succeed");
 
-    // Server should drain components and exit successfully (code 0) within deadline
+    // Server should exit successfully (code 0) within deadline upon SIGTERM
     let exit_status = timeout(Duration::from_secs(10), child.wait())
         .await
         .expect("server failed to exit within 10s deadline upon SIGTERM")

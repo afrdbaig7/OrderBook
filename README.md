@@ -199,7 +199,7 @@ The test suite explicitly establishes what is verified versus what is out of sco
 | **Browser renders** | UI components mount, initialize store, and render depth ladder |
 | **Sequence probe passes** | WebSocket stream is contiguous; zero sequence gaps or dropped deltas |
 | **Client state matches engine** | Complete bootstrap snapshot + delta reconstruction preserves full depth across boundary changes |
-| **Graceful shutdown test passes** | Shutdown signal drains queues, closes sockets with `Close` frames, and exits with code 0 |
+| **Graceful shutdown** | Component test verifies queue draining to persistence writer (`shutdown.rs`); integration test verifies SIGTERM exits with code 0 and emits WebSocket `Close` frames (`e2e.rs`) |
 
 ### Automated Commands
 
