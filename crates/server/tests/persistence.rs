@@ -67,10 +67,28 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut stmts = Vec::new();
     let mut current = String::new();
     let mut in_dollar_quote = false;
+    let mut in_line_comment = false;
 
     let chars: Vec<char> = sql.chars().collect();
     let mut i = 0;
     while i < chars.len() {
+        if in_line_comment {
+            if chars[i] == '\n' {
+                in_line_comment = false;
+            }
+            current.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        if !in_dollar_quote && i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] == '-' {
+            in_line_comment = true;
+            current.push('-');
+            current.push('-');
+            i += 2;
+            continue;
+        }
+
         if i + 1 < chars.len() && chars[i] == '$' && chars[i + 1] == '$' {
             in_dollar_quote = !in_dollar_quote;
             current.push('$');
@@ -78,6 +96,7 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
             i += 2;
             continue;
         }
+
         if chars[i] == ';' && !in_dollar_quote {
             let trimmed = current.trim();
             if !trimmed.is_empty() {
@@ -87,6 +106,7 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
             i += 1;
             continue;
         }
+
         current.push(chars[i]);
         i += 1;
     }
@@ -95,6 +115,26 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
         stmts.push(trimmed.to_string());
     }
     stmts
+}
+
+#[test]
+fn test_split_sql_statements_handles_comments_and_dollar_quotes() {
+    let schema_sql = include_str!("../../../db/schema.sql");
+    let stmts = split_sql_statements(schema_sql);
+    assert_eq!(
+        stmts.len(),
+        8,
+        "expected 8 top-level statements in db/schema.sql, got {}",
+        stmts.len()
+    );
+    assert!(stmts[0].contains("CREATE EXTENSION"));
+    assert!(stmts[1].contains("CREATE TABLE IF NOT EXISTS trades"));
+    assert!(stmts[2].contains("SELECT create_hypertable"));
+    assert!(stmts[3].contains("CREATE INDEX IF NOT EXISTS trades_seq_idx"));
+    assert!(stmts[4].contains("CREATE MATERIALIZED VIEW IF NOT EXISTS candles_1s"));
+    assert!(stmts[5].contains("DO $$"));
+    assert!(stmts[6].contains("SELECT add_continuous_aggregate_policy"));
+    assert!(stmts[7].contains("CALL refresh_continuous_aggregate"));
 }
 
 /// Global lock to serialize database tests against TEST_DATABASE_URL to prevent concurrent schema mutations.
