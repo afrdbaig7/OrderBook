@@ -73,6 +73,9 @@ BEGIN
                 end_offset        => INTERVAL '1 second',
                 schedule_interval => INTERVAL '1 second',
                 if_not_exists     => TRUE);
+
+            -- Backfill historical trades so pre-existing data prior to policy window is restored
+            CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);
         ELSE
             ALTER MATERIALIZED VIEW candles_1s SET (timescaledb.materialized_only = false);
         END IF;

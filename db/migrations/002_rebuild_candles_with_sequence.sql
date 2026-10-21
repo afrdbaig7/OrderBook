@@ -36,3 +36,9 @@ SELECT add_continuous_aggregate_policy('candles_1s',
     end_offset        => INTERVAL '1 second',
     schedule_interval => INTERVAL '1 second',
     if_not_exists     => TRUE);
+
+-- 5. Explicitly backfill historical trades into the continuous aggregate.
+-- Because the view was recreated WITH NO DATA and continuous aggregate policies only
+-- refresh recent data within `start_offset` (1 hour), this backfill recalculates all
+-- older historical trades from the earliest available record up to the live edge.
+CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);

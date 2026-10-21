@@ -63,12 +63,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Global lock to serialize database tests against TEST_DATABASE_URL to prevent concurrent schema mutations.
+static DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test(flavor = "multi_thread")]
 async fn persists_trades_and_candles() {
     let Some(url) = database_url() else {
         eprintln!("TEST_DATABASE_URL unset — skipping persistence gate");
         return;
     };
+
+    let _guard = DB_TEST_LOCK.lock().await;
 
     // The DB itself must be reachable, with the schema applied.
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -382,6 +387,8 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         return;
     };
 
+    let _guard = DB_TEST_LOCK.lock().await;
+
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
@@ -424,7 +431,41 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         "legacy view definition should not contain 'seq'"
     );
 
-    // 2. Execute migration: 002_rebuild_candles_with_sequence.sql
+    // 2. Insert historical trades outside the 1-hour policy window (3 hours ago)
+    // with identical timestamps and distinct prices to test sequence tie-breaking.
+    let _ = sqlx::query("DELETE FROM trades WHERE seq >= 50_000_000")
+        .execute(&pool)
+        .await;
+
+    let hist_ts_ms: i64 = now_ms() - (3 * 3600 * 1000);
+    let hist_trades = [
+        (50_000_001i64, 200i64, 10i64),
+        (50_000_002i64, 210i64, 15i64),
+    ];
+    for &(seq, price, qty) in &hist_trades {
+        sqlx::query(
+            "INSERT INTO trades (ts, seq, price, qty, taker_side) VALUES (to_timestamp($1 / 1000.0), $2, $3, $4, 0)",
+        )
+        .bind(hist_ts_ms)
+        .bind(seq)
+        .bind(price)
+        .bind(qty)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Refresh the legacy continuous aggregate for that historical bucket
+    let _ = sqlx::query(
+        "CALL refresh_continuous_aggregate('candles_1s', to_timestamp($1 / 1000.0), to_timestamp(($1 + 1000) / 1000.0))",
+    )
+    .bind(hist_ts_ms)
+    .execute(&pool)
+    .await;
+
+    // 3. Execute migration: 002_rebuild_candles_with_sequence.sql
+    // This drops the old view, recreates it WITH NO DATA, restores policy, and runs:
+    // CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);
     let migration_sql =
         include_str!("../../../db/migrations/002_rebuild_candles_with_sequence.sql");
     for statement in migration_sql.split(';') {
@@ -437,7 +478,7 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         }
     }
 
-    // 3. Verify upgraded view definition uses `seq`
+    // 4. Verify upgraded view definition uses `seq`
     let upgraded_row: (String,) = sqlx::query_as("SELECT pg_get_viewdef('candles_1s'::regclass)")
         .fetch_one(&pool)
         .await
@@ -447,7 +488,25 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         "upgraded view definition must contain 'seq'"
     );
 
-    // 4. Verify continuous aggregate policy is restored and functional
+    // 5. Verify historical recovery: older candle data (3 hours old) must be queryable
+    // and correctly ordered by sequence number via the backfill procedure!
+    let hist_candle: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT open, high, low, close, volume FROM candles_1s WHERE bucket = to_timestamp($1 / 1000.0)",
+    )
+    .bind(hist_ts_ms)
+    .fetch_optional(&pool)
+    .await
+    .expect("query historical candle");
+
+    let (open, high, low, close, volume) = hist_candle
+        .expect("historical candle (3 hours old) must be queryable after migration backfill");
+    assert_eq!(open, 200, "historical open must follow seq 50_000_001");
+    assert_eq!(high, 210, "historical high must equal max price");
+    assert_eq!(low, 200, "historical low must equal min price");
+    assert_eq!(close, 210, "historical close must follow seq 50_000_002");
+    assert_eq!(volume, 25, "historical volume must sum 10 + 15");
+
+    // 6. Verify continuous aggregate policy is restored and functional
     let policy_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate'",
     )
@@ -458,6 +517,11 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         policy_count.0 > 0,
         "continuous aggregate refresh policy must be registered"
     );
+
+    // Cleanup test trades
+    let _ = sqlx::query("DELETE FROM trades WHERE seq >= 50_000_000")
+        .execute(&pool)
+        .await;
 
     pool.close().await;
 }
