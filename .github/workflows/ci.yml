@@ -76,6 +76,7 @@ jobs:
         run: |
           docker compose config
           docker compose -f docker-compose.yml -f docker-compose.dev.yml config
+          docker compose -f docker-compose.smoke.yml config
       - name: Run container quickstart smoke test
         run: |
           chmod +x scripts/smoke_test.sh

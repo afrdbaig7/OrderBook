@@ -1,0 +1,56 @@
+# docker-compose.smoke.yml — Dedicated isolated stack for automated smoke testing.
+#
+# Isolated from standard development containers and volumes:
+# - Uses dynamic project naming (-p orderbook-smoke-<id>) to prevent name collisions
+# - Avoids static container_name definitions
+# - Binds proxy port to 127.0.0.1:${SMOKE_PORT:-15173} to avoid clashing with :5173
+# - Uses dedicated smoke_db_data volume so developer demo data is never deleted
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: orderbook
+      POSTGRES_PASSWORD: orderbook
+      POSTGRES_DB: orderbook
+    volumes:
+      - smoke_db_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderbook -d orderbook"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      - DATABASE_URL=postgres://orderbook:orderbook@timescaledb:5432/orderbook
+      - RUST_LOG=info
+      - ALLOW_PUBLIC_FEED_RATE=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${SMOKE_PORT:-15173}:80"
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  smoke_db_data:
