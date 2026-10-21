@@ -41,12 +41,41 @@ FROM trades
 GROUP BY bucket
 WITH NO DATA;
 
--- Upgrade path for existing databases: explicitly ensure materialized_only = false
--- is applied even if the materialized view already existed.
+-- Upgrade path for existing databases:
+-- If candles_1s was created under the older schema (ordered by timestamp instead of sequence),
+-- rebuild it to sequence open and close prices deterministically by `seq`.
+-- Also ensure `materialized_only = false` is active.
 DO $$
+DECLARE
+    view_def TEXT;
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'candles_1s') THEN
-        ALTER MATERIALIZED VIEW candles_1s SET (timescaledb.materialized_only = false);
+        SELECT pg_get_viewdef('candles_1s'::regclass) INTO view_def;
+        IF view_def NOT LIKE '%seq%' THEN
+            RAISE NOTICE 'Upgrading candles_1s continuous aggregate to sequence-ordered open/close...';
+            PERFORM remove_continuous_aggregate_policy('candles_1s', if_exists => true);
+            DROP MATERIALIZED VIEW candles_1s CASCADE;
+
+            CREATE MATERIALIZED VIEW candles_1s
+            WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+            SELECT time_bucket('1 second', ts) AS bucket,
+                   first(price, seq)::bigint AS open,
+                   max(price)                AS high,
+                   min(price)                AS low,
+                   last(price, seq)::bigint  AS close,
+                   sum(qty)::bigint          AS volume
+            FROM trades
+            GROUP BY bucket
+            WITH NO DATA;
+
+            PERFORM add_continuous_aggregate_policy('candles_1s',
+                start_offset      => INTERVAL '1 hour',
+                end_offset        => INTERVAL '1 second',
+                schedule_interval => INTERVAL '1 second',
+                if_not_exists     => TRUE);
+        ELSE
+            ALTER MATERIALIZED VIEW candles_1s SET (timescaledb.materialized_only = false);
+        END IF;
     END IF;
 END $$;
 

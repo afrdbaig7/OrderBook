@@ -93,7 +93,6 @@ async fn persists_trades_and_candles() {
             format!("--port={port}"),
             "--feed-rate=2000".to_string(),
             "--seed=7".to_string(),
-            "--snapshot-depth=1000".to_string(),
             "--allow-public-feed-rate".to_string(),
         ])
         .env("DATABASE_URL", url)
@@ -373,5 +372,92 @@ async fn persists_trades_and_candles() {
 
     child.kill().await.expect("kill server");
     let _ = child.wait().await;
+    pool.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_sequence_ordering() {
+    let Some(url) = database_url() else {
+        eprintln!("TEST_DATABASE_URL unset — skipping migration test");
+        return;
+    };
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+
+    // 1. Simulate legacy database state: candles_1s defined with `first(price, ts)`
+    let _ =
+        sqlx::query("SELECT remove_continuous_aggregate_policy('candles_1s', if_exists => true)")
+            .execute(&pool)
+            .await;
+    let _ = sqlx::query("DROP MATERIALIZED VIEW IF EXISTS candles_1s CASCADE")
+        .execute(&pool)
+        .await;
+
+    sqlx::query(
+        "CREATE MATERIALIZED VIEW candles_1s
+         WITH (timescaledb.continuous) AS
+         SELECT time_bucket('1 second', ts) AS bucket,
+                first(price, ts)::bigint AS open,
+                max(price)                AS high,
+                min(price)                AS low,
+                last(price, ts)::bigint  AS close,
+                sum(qty)::bigint          AS volume
+         FROM trades
+         GROUP BY bucket
+         WITH NO DATA;",
+    )
+    .execute(&pool)
+    .await
+    .expect("create legacy view");
+
+    // Verify the view is in the legacy timestamp-ordered state
+    let row: (String,) = sqlx::query_as("SELECT pg_get_viewdef('candles_1s'::regclass)")
+        .fetch_one(&pool)
+        .await
+        .expect("get legacy viewdef");
+    assert!(
+        !row.0.contains("seq"),
+        "legacy view definition should not contain 'seq'"
+    );
+
+    // 2. Execute migration: 002_rebuild_candles_with_sequence.sql
+    let migration_sql =
+        include_str!("../../../db/migrations/002_rebuild_candles_with_sequence.sql");
+    for statement in migration_sql.split(';') {
+        let trimmed = statement.trim();
+        if !trimmed.is_empty() {
+            sqlx::query(trimmed)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("migration statement failed: {trimmed}\nError: {e}"));
+        }
+    }
+
+    // 3. Verify upgraded view definition uses `seq`
+    let upgraded_row: (String,) = sqlx::query_as("SELECT pg_get_viewdef('candles_1s'::regclass)")
+        .fetch_one(&pool)
+        .await
+        .expect("get upgraded viewdef");
+    assert!(
+        upgraded_row.0.contains("seq"),
+        "upgraded view definition must contain 'seq'"
+    );
+
+    // 4. Verify continuous aggregate policy is restored and functional
+    let policy_count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("check policy job");
+    assert!(
+        policy_count.0 > 0,
+        "continuous aggregate refresh policy must be registered"
+    );
+
     pool.close().await;
 }
