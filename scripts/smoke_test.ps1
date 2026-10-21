@@ -19,6 +19,12 @@ $env:SMOKE_PORT = $smokePort
 $randomId = Get-Random -Minimum 1000 -Maximum 9999
 $projectName = "ob-smoke-$randomId"
 
+# Dependency validation
+if (-not (Get-Command node -ErrorAction SilentlyContinue) -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    Write-Error "Required WebSocket probe dependencies missing: 'node' or 'cargo' must be available in PATH"
+    exit 1
+}
+
 Write-Host "==> Smoke test initializing with isolated project '$projectName' on port $smokePort..."
 
 # Register cleanup in try/finally to ensure cleanup runs even if startup fails
@@ -90,9 +96,9 @@ try {
             $candleResp = Invoke-RestMethod -Uri "$baseUrl/candles?from=$fromMs&to=$nowMs&interval=1s" -Method Get
             if ($candleResp.candles -and $candleResp.candles.Count -gt 0) {
                 $firstBar = $candleResp.candles[0]
-                if ($null -ne $firstBar.open -and $null -ne $firstBar.volume -and $firstBar.volume -gt 0) {
+                if ($null -ne $firstBar.ts -and $null -ne $firstBar.open -and $null -ne $firstBar.high -and $null -ne $firstBar.low -and $null -ne $firstBar.close -and $null -ne $firstBar.volume -and $firstBar.volume -gt 0) {
                     $candlesVerified = $true
-                    Write-Host "Verified non-empty OHLCV candle: bucket=$($firstBar.bucket), open=$($firstBar.open), vol=$($firstBar.volume)"
+                    Write-Host "Verified valid OHLCV candle row: ts=$($firstBar.ts), open=$($firstBar.open), high=$($firstBar.high), low=$($firstBar.low), close=$($firstBar.close), vol=$($firstBar.volume)"
                     break
                 }
             }
@@ -116,7 +122,7 @@ try {
             Write-Error "WebSocket probe failed with exit code $LASTEXITCODE"
         }
     } else {
-        Write-Host "Skipping ws_probe: neither node nor cargo found on host runner"
+        Write-Error "Required WebSocket probe dependencies missing (node or cargo required)"
     }
 
     Write-Host "==> All isolated container smoke test checks passed successfully!"

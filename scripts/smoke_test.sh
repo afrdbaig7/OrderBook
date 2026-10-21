@@ -20,6 +20,12 @@ PROJECT_NAME="ob-smoke-${RANDOM:-$$}"
 SMOKE_PORT="${SMOKE_PORT:-15173}"
 export SMOKE_PORT
 
+# 2. Dependency validation
+if ! command -v node >/dev/null 2>&1 && ! command -v cargo >/dev/null 2>&1; then
+    echo "Error: Required WebSocket probe dependencies missing: 'node' or 'cargo' must be available in PATH" >&2
+    exit 1
+fi
+
 echo "==> Smoke test initializing with isolated project '$PROJECT_NAME' on port $SMOKE_PORT..."
 
 # 2. Pre-register cleanup before running any docker commands
@@ -84,11 +90,21 @@ for i in {1..20}; do
     NOW_MS=$(date +%s000)
     FROM_MS=$((NOW_MS - 60000))
     RESP=$(curl -s -f "$BASE_URL/candles?from=${FROM_MS}&to=${NOW_MS}&interval=1s" || true)
-    # Validate non-empty candles array and required fields
-    if echo "$RESP" | grep -q '"bucket"' && echo "$RESP" | grep -q '"open"' && echo "$RESP" | grep -q '"volume"'; then
-        CANDLES_VERIFIED=true
-        echo "Verified non-empty OHLCV candle row: $(echo "$RESP" | grep -o '{"bucket"[^}]*}' | head -n 1)"
-        break
+    if [ -n "$RESP" ]; then
+        if node -e '
+            const resp = JSON.parse(process.argv[1]);
+            if (!Array.isArray(resp.candles) || resp.candles.length === 0) process.exit(1);
+            const c = resp.candles[0];
+            if (typeof c.ts !== "number" || typeof c.open !== "number" || typeof c.high !== "number" ||
+                typeof c.low !== "number" || typeof c.close !== "number" || typeof c.volume !== "number" || c.volume <= 0) {
+                process.exit(1);
+            }
+            console.log(`Verified valid OHLCV candle row: ts=${c.ts}, O=${c.open}, H=${c.high}, L=${c.low}, C=${c.close}, V=${c.volume}`);
+            process.exit(0);
+        ' "$RESP" 2>/dev/null; then
+            CANDLES_VERIFIED=true
+            break
+        fi
     fi
     sleep 1
 done
@@ -104,7 +120,8 @@ if command -v node >/dev/null 2>&1; then
 elif command -v cargo >/dev/null 2>&1; then
     cargo run -p server --bin ws_probe -- --url "$WS_URL" --count 25
 else
-    echo "Skipping ws_probe: neither node nor cargo found on host runner"
+    echo "Error: Required WebSocket probe dependencies missing (node or cargo required)" >&2
+    exit 1
 fi
 
 echo "==> All isolated container smoke test checks passed successfully!"
