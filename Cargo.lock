@@ -1665,6 +1665,7 @@ dependencies = [
  "feed",
  "futures-util",
  "hdrhistogram",
+ "libc",
  "serde",
  "serde_json",
  "sqlx",

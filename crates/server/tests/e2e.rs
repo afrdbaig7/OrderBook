@@ -150,7 +150,6 @@ async fn live_server_stream() {
             format!("--port={port}"),
             "--feed-rate=5000".to_string(),
             "--seed=42".to_string(),
-            "--snapshot-depth=1000".to_string(),
             "--allow-public-feed-rate".to_string(),
         ])
         .env("RUST_LOG", "warn")
@@ -263,7 +262,6 @@ async fn slow_client_eviction_and_recovery() {
             format!("--port={port}"),
             "--feed-rate=2000".to_string(),
             "--seed=42".to_string(),
-            "--snapshot-depth=1000".to_string(),
             "--broadcast-capacity=32".to_string(),
             "--allow-public-feed-rate".to_string(),
         ])
@@ -375,10 +373,89 @@ async fn cli_configuration_validation_at_startup() {
         !status_feed_high.success(),
         "excessive feed-rate must exit with non-zero code"
     );
+
+    // 4. snapshot-depth > 0 must be rejected (snapshots must always be complete)
+    let status_snap_positive = Command::new(bin)
+        .arg("--snapshot-depth=100")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .expect("spawn server");
+    assert!(
+        !status_snap_positive.success(),
+        "positive snapshot-depth must exit with non-zero code"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn whole_server_process_shutdown_with_connected_clients() {
+async fn server_bootstrap_snapshot_includes_all_resting_levels_exceeding_default_display_limit() {
+    let port = free_port().await;
+    let bin = env!("CARGO_BIN_EXE_server");
+
+    let mut child = Command::new(bin)
+        .args([
+            format!("--port={port}"),
+            "--feed-rate=5000".to_string(),
+            "--seed=42".to_string(),
+            "--allow-public-feed-rate".to_string(),
+        ])
+        .env("RUST_LOG", "warn")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    wait_for_health(port).await;
+
+    // Allow feed to seed dozens of distinct price levels across both sides
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut socket, _) = timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .expect("ws connect timeout")
+    .expect("ws handshake");
+
+    let snap_frame = timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("snap timeout")
+        .expect("snap stream end");
+
+    let snap_text = match snap_frame.unwrap() {
+        tokio_tungstenite::tungstenite::Message::Text(t) => t,
+        other => panic!("expected text snapshot, got: {other:?}"),
+    };
+
+    let decoded = feed::Message::decode(&snap_text).expect("decode snapshot");
+    match decoded {
+        feed::Message::Snapshot(snap) => {
+            // Verify that the server sends a complete bootstrap snapshot that exceeds
+            // the historical 20-level display truncation limit.
+            assert!(
+                snap.bids.len() > 20,
+                "expected bootstrap bids to exceed historical 20-level limit, got {}",
+                snap.bids.len()
+            );
+            assert!(
+                snap.asks.len() > 20,
+                "expected bootstrap asks to exceed historical 20-level limit, got {}",
+                snap.asks.len()
+            );
+        }
+        other => panic!("expected Message::Snapshot, got: {other:?}"),
+    }
+
+    child.kill().await.expect("kill child");
+    let _ = child.wait().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forced_process_kill_with_connected_clients() {
     let port = free_port().await;
     let bin = env!("CARGO_BIN_EXE_server");
 
@@ -387,7 +464,6 @@ async fn whole_server_process_shutdown_with_connected_clients() {
             format!("--port={port}"),
             "--feed-rate=2000".to_string(),
             "--seed=42".to_string(),
-            "--snapshot-depth=0".to_string(),
             "--allow-public-feed-rate".to_string(),
         ])
         .env("RUST_LOG", "warn")
@@ -425,25 +501,100 @@ async fn whole_server_process_shutdown_with_connected_clients() {
         assert!(msg.unwrap().is_text());
     }
 
-    // Now trigger termination: on Windows child.kill() triggers TerminateProcess,
-    // on Unix it sends SIGKILL or we can wait for child process.
-    // Ensure process terminates within a bounded 5s window with no hang.
-    let start = std::time::Instant::now();
-    child.kill().await.expect("terminate child");
+    // Forceful process kill demonstrates immediate termination
+    child.kill().await.expect("kill child");
     let exit_status = timeout(Duration::from_secs(5), child.wait())
         .await
         .expect("server failed to exit within 5 seconds")
         .expect("wait error");
 
-    assert!(start.elapsed() < Duration::from_secs(5));
-    // Verify socket detected disconnection or close
+    // Sockets are dropped abruptly upon SIGKILL/TerminateProcess
     let end_item = timeout(Duration::from_secs(2), socket.next()).await;
     match end_item {
-        Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => {}
-        Ok(Some(Err(_))) => {}
-        Ok(None) => {}
-        Err(_) => {}
-        Ok(Some(Ok(_))) => {}
+        Ok(Some(Err(_))) | Ok(None) => {}
+        other => panic!("expected socket termination on forced kill, got: {other:?}"),
     }
     let _ = exit_status;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn graceful_process_shutdown_via_sigterm() {
+    let port = free_port().await;
+    let bin = env!("CARGO_BIN_EXE_server");
+
+    let mut child = Command::new(bin)
+        .args([
+            format!("--port={port}"),
+            "--feed-rate=2000".to_string(),
+            "--seed=42".to_string(),
+            "--allow-public-feed-rate".to_string(),
+        ])
+        .env("RUST_LOG", "warn")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    wait_for_health(port).await;
+
+    // Connect active WebSocket client
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut socket, _) = timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .expect("ws connect")
+    .expect("ws handshake");
+
+    // Read snapshot
+    let snap_item = timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("snap timeout")
+        .expect("snap stream end");
+    assert!(snap_item.unwrap().is_text(), "expected snapshot");
+
+    // Read a few live messages to establish active streaming
+    for _ in 0..5 {
+        let msg = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("msg timeout")
+            .expect("stream ended");
+        assert!(msg.unwrap().is_text());
+    }
+
+    // Send SIGTERM to initiate cooperative graceful shutdown
+    let pid = child.id().expect("child pid") as i32;
+    let kill_res = unsafe { libc::kill(pid, libc::SIGTERM) };
+    assert_eq!(kill_res, 0, "kill(SIGTERM) should succeed");
+
+    // Server should drain components and exit successfully (code 0) within deadline
+    let exit_status = timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("server failed to exit within 10s deadline upon SIGTERM")
+        .expect("wait error");
+
+    assert!(
+        exit_status.success(),
+        "graceful SIGTERM shutdown should exit with code 0, got: {exit_status:?}"
+    );
+
+    // Verify active WebSocket connection was cleanly closed with a Close frame
+    let mut received_close_frame = false;
+    while let Ok(Some(msg)) = timeout(Duration::from_millis(500), socket.next()).await {
+        match msg {
+            Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
+                received_close_frame = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(
+        received_close_frame,
+        "expected WebSocket Close frame upon server graceful shutdown"
+    );
 }

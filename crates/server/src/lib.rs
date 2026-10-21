@@ -66,7 +66,8 @@ pub struct Args {
     /// Seed for the deterministic synthetic feed.
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
-    /// Book levels returned in each bootstrap snapshot (default 0 for complete book within enforced limits, or positive depth limit).
+    /// Deprecated: bootstrap snapshots are always complete (depth = 0) within enforced engine limits.
+    /// Positive values are rejected at startup; configure display limits on the client instead.
     #[arg(long = "snapshot-depth", default_value_t = 0)]
     pub snapshot_depth: usize,
     /// Postgres/TimescaleDB DSN. Persistence is disabled when unset.
@@ -105,10 +106,9 @@ impl Args {
                 self.broadcast_capacity
             ));
         }
-        if self.snapshot_depth > engine::MAX_BOOK_LEVELS_PER_SIDE {
+        if self.snapshot_depth > 0 {
             return Err(format!(
-                "snapshot-depth cannot exceed maximum book levels ({}), got {}",
-                engine::MAX_BOOK_LEVELS_PER_SIDE,
+                "positive --snapshot-depth ({}) is rejected: bootstrap snapshots must be complete (depth=0) to prevent client desynchronization across boundary changes; configure display limits on the client instead",
                 self.snapshot_depth
             ));
         }
@@ -192,7 +192,6 @@ pub async fn run(args: Args) {
         broadcast: broadcast_tx.clone(),
         metrics: metrics.clone(),
         feed_rate: feed_rate.clone(),
-        snapshot_depth: args.snapshot_depth,
         persistence: persistence.clone(),
         shutdown: shutdown_rx.clone(),
         candle_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -217,7 +216,7 @@ pub async fn run(args: Args) {
         port = args.port,
         feed_rate = args.feed_rate,
         seed = args.seed,
-        snapshot_depth = args.snapshot_depth,
+        snapshot = "complete",
         persistence = args.database_url.is_some(),
         "server listening"
     );

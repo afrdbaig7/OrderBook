@@ -28,6 +28,9 @@ feed = { path = "../feed" }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "server"
 path = "src/main.rs"

@@ -26,8 +26,6 @@ pub struct AppState {
     /// Live feed rate (orders/second), adjustable at runtime via
     /// `POST /feed-rate`.
     pub feed_rate: Arc<AtomicU64>,
-    /// Levels returned in a bootstrap `snapshot`.
-    pub snapshot_depth: usize,
     /// Connection pool slot. `None` when persistence is disabled or the DB
     /// is not reachable yet, in which case `/candles` returns `503`.
     pub persistence: Persistence,
