@@ -1,26 +1,14 @@
 #!/usr/bin/env bash
-# scripts/smoke_test.sh — Automated container quickstart smoke test.
-#
-# Validates the full-stack container environment end-to-end using an ISOLATED
-# test configuration to protect developer demo data and port allocations:
-#
-# Check                          What it establishes
-# ------------------------------ ----------------------------------------------------
-# HTML loads                     Static files are served through Nginx reverse proxy
-# Rate control policy mutates    Protected/public API policy functions via reverse proxy
-# Persistence growth             Trades land in TimescaleDB hypertable
-# Candle aggregate validation    Continuous aggregate produces non-empty OHLCV bars
-# WebSocket stream probe         Reverse proxy routes WS; snapshot + contiguous deltas
-# Clean exit & isolated teardown Isolated containers & test volumes cleaned up safely
+# Checks HTTP delivery, feed control, persistence, candles, and WebSocket sequencing.
+# Uses a separate Compose project so cleanup leaves the developer's demo data alone.
 
 set -euo pipefail
 
-# 1. Project & Port Isolation
+# SMOKE_PORT can be overridden when the default test port is in use.
 PROJECT_NAME="ob-smoke-${RANDOM:-$$}"
 SMOKE_PORT="${SMOKE_PORT:-15173}"
 export SMOKE_PORT
 
-# 2. Dependency validation
 if ! command -v node >/dev/null 2>&1; then
     echo "Error: Node.js (v20+) is required to run container smoke tests" >&2
     exit 1
@@ -28,7 +16,7 @@ fi
 
 echo "==> Smoke test initializing with isolated project '$PROJECT_NAME' on port $SMOKE_PORT..."
 
-# 2. Pre-register cleanup before running any docker commands
+# Register cleanup before startup so a partial launch is also cleaned up.
 cleanup() {
     local exit_code=$?
     echo "==> Tearing down isolated smoke test stack ($PROJECT_NAME)..."
@@ -37,7 +25,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# 3. Build and launch isolated stack
 echo "==> Building and launching isolated Docker stack..."
 docker compose -p "$PROJECT_NAME" -f docker-compose.smoke.yml up --build -d
 

@@ -18,14 +18,10 @@ export interface OrderBookState {
 }
 
 /**
- * Subscribes to the `/ws` market-data stream.
+ * Connects the market store to /ws and publishes display snapshots.
  *
- * Networking and book mutation happen **outside** React, in a
- * [`MarketStore`] held in a ref: incoming messages never trigger a render.
- * A single `requestAnimationFrame` loop publishes a fresh snapshot to React at
- * screen refresh rate, so a high-frequency stream costs at most one render per
- * frame. Sequence-gap detection lives in the store; on a gap
- * the socket is closed and a fresh snapshot is requested automatically.
+ * Messages mutate the store directly; React updates at most once per animation
+ * frame. Sequence gaps close the connection so a reconnect can obtain a snapshot.
  */
 export function useOrderBook(
   url: string,

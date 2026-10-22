@@ -1,5 +1,4 @@
-// Wire protocol for the `/ws` market data stream, plus a pure TypeScript
-// reference implementation of the client-side book with strict runtime validation.
+// Wire types, runtime validation, and book reconstruction for the /ws stream.
 
 export const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER; // 2^53 - 1 (9,007,199,254,740,991)
 
@@ -56,8 +55,6 @@ export interface ApplyResult {
   status: ApplyStatus;
   message?: string;
 }
-
-// ── Client-side reconstruction (mirror of crate `feed`'s `ClientBook`) ──
 
 /**
  * A price-indexed book image rebuilt purely from wire messages.

@@ -4,11 +4,10 @@ import type { Candle } from "../hooks/useCandles";
 import { reconcileHistoryCandles } from "./candleReconcile";
 
 describe("reconcileHistoryCandles", () => {
-  it("replaces completed candle with authoritative history after disconnect and missed trades", () => {
+  it("repairs a settled candle after missed trades", () => {
     const buckets = new Map<number, Candle>();
 
-    // Client had observed early trades at second 10,000, but disconnected at 10,200 ms.
-    // Client has close = 100, volume = 5.
+    // Disconnect partway through the bucket starting at 10,000 ms.
     buckets.set(10000, {
       ts: 10000,
       open: 98,
@@ -18,11 +17,9 @@ describe("reconcileHistoryCandles", () => {
       volume: 5,
     });
 
-    // Currently at second 11,000 (second 10,000 is completed).
     const activeSecondTs = 11000;
 
-    // Database reports the authoritative completed candle for second 10,000:
-    // After disconnect, trades traded up to 105 and closed at 104 with total volume 25.
+    // History includes the trades that arrived after the disconnect.
     const history: Candle[] = [
       {
         ts: 10000,
@@ -38,20 +35,18 @@ describe("reconcileHistoryCandles", () => {
 
     const reconciled = buckets.get(10000)!;
     expect(reconciled).toBeDefined();
-    // Authoritative close, high, and volume replaced the stale disconnected bucket
     expect(reconciled.close).toBe(104);
     expect(reconciled.high).toBe(105);
     expect(reconciled.volume).toBe(25);
     expect(reconciled.open).toBe(98);
   });
 
-  it("preserves active candle live close while reconciling bounds", () => {
+  it("keeps the live close when active history is older", () => {
     const buckets = new Map<number, Candle>();
 
-    // Active ongoing second is 12,000.
     const activeSecondTs = 12000;
 
-    // Client has already seen fresh live trade closing at 108
+    // The client has already seen a newer trade at 108.
     buckets.set(12000, {
       ts: 12000,
       open: 100,
@@ -61,7 +56,7 @@ describe("reconcileHistoryCandles", () => {
       volume: 15,
     });
 
-    // History query snapshot arrives for 12,000 from an earlier millisecond (close was 102)
+    // The response was captured before the live trade at 108.
     const history: Candle[] = [
       {
         ts: 12000,
@@ -76,11 +71,8 @@ describe("reconcileHistoryCandles", () => {
     reconcileHistoryCandles(buckets, history, activeSecondTs, 120);
 
     const reconciled = buckets.get(12000)!;
-    // Live latest close must be preserved!
     expect(reconciled.close).toBe(108);
-    // Lower bound merged
     expect(reconciled.low).toBe(98);
-    // Upper bound merged
     expect(reconciled.high).toBe(108);
   });
 

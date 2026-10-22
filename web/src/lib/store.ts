@@ -1,10 +1,5 @@
-// Mutable client-side market state, written to at network speed and read at
-// render speed.
-//
-// The React hooks never call `setState` per message: the WebSocket handler
-// mutates this store inside a ref and a `requestAnimationFrame` loop publishes
-// an immutable snapshot to the UI at screen refresh rate. Everything here is
-// integer-valued until a component formats it for display.
+// WebSocket messages update this store without rendering React. The hook
+// publishes a display snapshot at most once per animation frame.
 
 import { PureOrderBook, type Trade, type WireMessage } from "./protocol";
 

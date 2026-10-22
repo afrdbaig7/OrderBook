@@ -24,13 +24,10 @@ function toBar(candle: Candle): CandlestickData<UTCTimestamp> {
 }
 
 /**
- * 1-second candle chart.
+ * One-second candles from persisted history and live trades.
  *
- * History comes from `GET /candles` (TimescaleDB); the live edge is maintained
- * from trade messages so the newest bar updates in real time even before the
- * aggregate refreshes. Live trades are folded into the in-progress bar and
- * pushed to the chart on `requestAnimationFrame`, so a high trade rate still
- * costs at most one chart update per frame.
+ * History repairs missed trades. Live updates are batched per animation frame
+ * so the active bar can update without waiting for the next history fetch.
  */
 export function CandleChart({
   store,

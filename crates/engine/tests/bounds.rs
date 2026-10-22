@@ -1,9 +1,4 @@
-//! Arithmetic boundary and numeric overflow tests.
-//!
-//! Verifies Requirement 4:
-//! Enforces numeric bounds (MAX_SAFE_INTEGER = 2^53 - 1 = 9,007,199,254,740,991)
-//! ensuring exact representation across JavaScript Number, PostgreSQL BIGINT,
-//! and checked arithmetic in the engine.
+//! Numeric limits for order input, price levels, and client interoperability.
 
 use engine::{
     Event, Order, OrderBook, OrderId, Price, RejectReason, Side, MAX_LEVEL_QTY, MAX_ORDER_QTY,

@@ -221,8 +221,7 @@ fn regression_deep_book_snapshot_reconstruction() {
     let (trunc_ladder_bids, _) = truncated_client.ladder(20);
     assert_eq!(trunc_ladder_bids.len(), 10, "ladder shows incomplete depth");
 
-    // Complete client reports synced=true AND its ladder is 100% complete:
-    // It correctly displays all 20 levels (prices 120 down to 101), matching engine exactly!
+    // A complete bootstrap retains levels that become visible after cancellation.
     assert!(complete_client.is_synced());
     assert_eq!(complete_client.last_seq(), engine.seq());
     assert_eq!(complete_client.bids().len(), 20);

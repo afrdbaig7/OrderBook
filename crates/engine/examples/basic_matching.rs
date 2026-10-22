@@ -1,16 +1,6 @@
-//! `crates/engine/examples/basic_matching.rs`
+//! Limit submission, matching, cancellation, and snapshots without a server.
 //!
-//! A runnable example demonstrating core matching engine operations without
-//! network, async runtime, or database dependencies:
-//! 1. Submitting resting limit orders (bids and asks).
-//! 2. Submitting an aggressive crossing limit order (triggering a partial fill and resting remainder).
-//! 3. Submitting an order cancellation.
-//! 4. Inspecting the resulting order book snapshot and monotonically assigned sequence numbers.
-//!
-//! Run with:
-//! ```bash
-//! cargo run -p engine --example basic_matching
-//! ```
+//! Run with `cargo run -p engine --example basic_matching`.
 
 use engine::{Event, Order, OrderBook, OrderId, Price, Side};
 
@@ -57,7 +47,6 @@ fn main() {
 
     let mut book = OrderBook::new();
 
-    // 1. Submit resting limit orders on both sides of the book
     println!("\n1. Seeding resting liquidity...");
     let resting_bid = Order {
         id: OrderId(1),
@@ -93,10 +82,8 @@ fn main() {
         book.best_ask()
     );
 
-    // 2. Submit an aggressive crossing order that matches existing resting liquidity
-    // Buyer wants 40 units up to price 106.
-    // Maker order 2 is resting at 105 for 30 units -> Full fill at maker price (105).
-    // Remaining 10 units cannot match ask at 108 -> Rests as a new bid at 106.
+    // Buy 30 at the maker's price of 105, then rest the remaining 10 at 106.
+    // The ask at 108 is outside the buyer's limit.
     println!("\n2. Submitting aggressive crossing limit order (Bid 40 @ 106)...");
     let crossing_bid = Order {
         id: OrderId(4),
@@ -116,12 +103,10 @@ fn main() {
         book.best_ask()
     );
 
-    // 3. Cancel an open resting order
     println!("\n3. Cancelling resting bid order (OrderId 1)...");
     let cancel_events = book.cancel(OrderId(1));
     print_events("Cancellation Result", &cancel_events);
 
-    // 4. Capture a complete point-in-time L2 snapshot
     println!("\n4. Capturing complete L2 snapshot...");
     let snapshot = book.snapshot(0); // 0 = complete depth within enforced limits
     println!("Snapshot at monotonic sequence {}:", snapshot.seq);

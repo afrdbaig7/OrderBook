@@ -47,11 +47,10 @@ async fn run(mut socket: WebSocket, state: AppState) {
     let mut shutdown = state.shutdown.clone();
     let send_timeout = Duration::from_secs(5);
 
-    // 1. Subscribe first so the snapshot cannot race ahead of live deltas.
+    // Subscribe before requesting the snapshot so no subsequent event is lost.
     let mut rx = state.broadcast.subscribe();
 
-    // 2. Ask the engine thread for a complete bootstrap snapshot (depth 0 = full book within capacity).
-    // Client-side display slicing manages presentation depth.
+    // Bootstrap the full book; clients choose how many levels to display.
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<SnapshotReply>();
     let command = EngineCommand::Snapshot {
         depth: 0,
@@ -97,7 +96,6 @@ async fn run(mut socket: WebSocket, state: AppState) {
     }
     info!(last_seq, "ws: snapshot sent");
 
-    // 3. Stream live messages.
     loop {
         tokio::select! {
             _ = shutdown.changed() => {

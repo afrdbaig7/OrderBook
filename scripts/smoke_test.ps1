@@ -1,16 +1,5 @@
-# scripts/smoke_test.ps1 — Automated container quickstart smoke test for PowerShell.
-#
-# Validates the full-stack container environment end-to-end using an ISOLATED
-# test configuration to protect developer demo data and port allocations:
-#
-# Check                          What it establishes
-# ------------------------------ ----------------------------------------------------
-# HTML loads                     Static files are served through Nginx reverse proxy
-# Rate control policy mutates    Protected/public API policy functions via reverse proxy
-# Persistence growth             Trades land in TimescaleDB hypertable
-# Candle aggregate validation    Continuous aggregate produces non-empty OHLCV bars
-# WebSocket stream probe         Reverse proxy routes WS; snapshot + contiguous deltas
-# Clean exit & isolated teardown Isolated containers & test volumes cleaned up safely
+# Checks HTTP delivery, feed control, persistence, candles, and WebSocket sequencing.
+# Uses a separate Compose project so cleanup leaves the developer's demo data alone.
 
 $ErrorActionPreference = "Stop"
 
@@ -19,7 +8,6 @@ $env:SMOKE_PORT = $smokePort
 $randomId = Get-Random -Minimum 1000 -Maximum 9999
 $projectName = "ob-smoke-$randomId"
 
-# Dependency validation
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Write-Error "Required dependency missing: Node.js (v20+) must be available in PATH to run container smoke tests"
     exit 1
@@ -27,7 +15,7 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 
 Write-Host "==> Smoke test initializing with isolated project '$projectName' on port $smokePort..."
 
-# Register cleanup in try/finally to ensure cleanup runs even if startup fails
+# Keep startup inside the try block so partial launches are cleaned up too.
 try {
     Write-Host "==> Building and launching isolated Docker stack..."
     docker compose -p $projectName -f docker-compose.smoke.yml up --build -d

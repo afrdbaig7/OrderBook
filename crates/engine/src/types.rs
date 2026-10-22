@@ -49,20 +49,20 @@ pub struct Fill {
     pub qty: u64,
 }
 
-/// Maximum safe integer for exact representation across JavaScript (`Number.MAX_SAFE_INTEGER`),
-/// database storage (`BIGINT`), and arithmetic operations: 2^53 - 1 (9,007,199,254,740,991).
+/// Largest safe integer for JavaScript `Number` (2^53 - 1).
+/// Also fits in PostgreSQL `BIGINT`.
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-/// Maximum allowed price tick: capped at [`MAX_SAFE_INTEGER`].
+/// Largest accepted price in ticks.
 pub const MAX_PRICE: u64 = MAX_SAFE_INTEGER;
 
-/// Maximum allowed quantity for a single order: capped at [`MAX_SAFE_INTEGER`].
+/// Largest accepted quantity per order.
 pub const MAX_ORDER_QTY: u64 = MAX_SAFE_INTEGER;
 
-/// Maximum aggregate quantity allowed at a single price level: capped at [`MAX_SAFE_INTEGER`].
+/// Largest aggregate quantity per price level.
 pub const MAX_LEVEL_QTY: u64 = MAX_SAFE_INTEGER;
 
-/// Maximum order identifier: capped at [`MAX_SAFE_INTEGER`] for JavaScript safe integer interoperability.
+/// Largest order identifier that clients can represent exactly.
 pub const MAX_ORDER_ID: u64 = MAX_SAFE_INTEGER;
 
 /// Maximum distinct price levels allowed per side of the book.

@@ -137,7 +137,7 @@ fn test_split_sql_statements_handles_comments_and_dollar_quotes() {
     assert!(stmts[7].contains("SELECT add_continuous_aggregate_policy"));
 }
 
-/// Global lock to serialize database tests against TEST_DATABASE_URL to prevent concurrent schema mutations.
+/// These tests share a schema, so migrations must not overlap candle queries.
 static DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test(flavor = "multi_thread")]
@@ -240,9 +240,7 @@ async fn persists_trades_and_candles() {
     assert!(body.contains("200 OK"), "{body}");
     println!("sample candles response: {}", &body[..body.len().min(400)]);
 
-    // ── Dedicated Database-Backed Candle Boundary Semantics ─────────────
-    // Assert returned timestamps follow [from, to): include from, exclude to,
-    // and handle empty and maximum-length windows correctly.
+    // Check [from, to) against actual candle timestamps.
     let json_str = body.split("\r\n\r\n").nth(1).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(json_str).expect("parse json");
     let candle_list = parsed["candles"].as_array().expect("candles array");
@@ -259,7 +257,7 @@ async fn persists_trades_and_candles() {
         "consecutive candles should have increasing timestamps"
     );
 
-    // 1. Exact half-open [t0, t1): must include t0 and exclude t1
+    // Include t0, exclude t1.
     let resp = http_request(
         port,
         "GET",
@@ -269,17 +267,21 @@ async fn persists_trades_and_candles() {
     .await
     .unwrap();
     assert!(resp.contains("200 OK"), "{resp}");
-    let b_json: serde_json::Value =
+    let response_json: serde_json::Value =
         serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    let b_candles = b_json["candles"].as_array().unwrap();
-    assert_eq!(b_candles.len(), 1, "expected exactly 1 candle in [t0, t1)");
+    let returned_candles = response_json["candles"].as_array().unwrap();
     assert_eq!(
-        b_candles[0]["ts"].as_i64(),
+        returned_candles.len(),
+        1,
+        "expected exactly 1 candle in [t0, t1)"
+    );
+    assert_eq!(
+        returned_candles[0]["ts"].as_i64(),
         Some(t0),
         "must include lower bound t0 and exclude upper bound t1"
     );
 
-    // 2. Exact half-open [t1, t1 + 1000): must include t1 and exclude t0
+    // The next bucket contains t1, not t0.
     let resp = http_request(
         port,
         "GET",
@@ -289,21 +291,21 @@ async fn persists_trades_and_candles() {
     .await
     .unwrap();
     assert!(resp.contains("200 OK"), "{resp}");
-    let b_json: serde_json::Value =
+    let response_json: serde_json::Value =
         serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    let b_candles = b_json["candles"].as_array().unwrap();
+    let returned_candles = response_json["candles"].as_array().unwrap();
     assert_eq!(
-        b_candles.len(),
+        returned_candles.len(),
         1,
         "expected exactly 1 candle in [t1, t1 + 1000)"
     );
     assert_eq!(
-        b_candles[0]["ts"].as_i64(),
+        returned_candles[0]["ts"].as_i64(),
         Some(t1),
         "must include lower bound t1 and exclude prior bucket t0"
     );
 
-    // 3. Empty window: [t0, t0): must return 200 OK with empty candles array
+    // An empty window returns no candles.
     let resp = http_request(
         port,
         "GET",
@@ -313,15 +315,15 @@ async fn persists_trades_and_candles() {
     .await
     .unwrap();
     assert!(resp.contains("200 OK"), "{resp}");
-    let b_json: serde_json::Value =
+    let response_json: serde_json::Value =
         serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    let b_candles = b_json["candles"].as_array().unwrap();
+    let returned_candles = response_json["candles"].as_array().unwrap();
     assert!(
-        b_candles.is_empty(),
+        returned_candles.is_empty(),
         "empty window [t0, t0) must return 0 candles"
     );
 
-    // 4. Maximum-length window: exactly 86_400_000 ms (24 hours)
+    // Accept exactly 24 hours.
     let max_from = to - 86_400_000;
     let resp = http_request(
         port,
@@ -336,7 +338,7 @@ async fn persists_trades_and_candles() {
         "24h maximum boundary window must return 200 OK: {resp}"
     );
 
-    // 5. Exceeding maximum-length window: 86_400_001 ms (24h + 1ms)
+    // Reject a window one millisecond longer than the limit.
     let over_from = to - 86_400_001;
     let resp = http_request(
         port,
@@ -351,8 +353,7 @@ async fn persists_trades_and_candles() {
         "over-24h window must return 400 Bad Request: {resp}"
     );
 
-    // ── Focused Verification: Elapsed-Time Deadline Flush Contract ──────
-    // Stop feed so no new trades are arriving and allow pending queue to commit
+    // Stop the feed and let pending trades commit before testing a partial batch.
     let resp = http_request(port, "POST", "/feed-rate", "{\"orders_per_second\":0}")
         .await
         .unwrap();
@@ -418,7 +419,7 @@ async fn persists_trades_and_candles() {
         "elapsed-time deadline (100ms) must flush partial batch without waiting for BATCH_ROWS (1000): expected {new_trades}, got {persisted_delta}"
     );
 
-    // ── Focused Verification: Deterministic Candle Ordering (ts, seq) ──
+    // Trades sharing a timestamp must follow sequence order.
     // Insert 4 trades with identical millisecond timestamp and distinct prices into a fresh bucket
     let test_bucket_ms: i64 = 1_850_000_000_000;
     let test_prices = [100i64, 108i64, 95i64, 102i64];
@@ -492,7 +493,7 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         .await
         .unwrap();
 
-    // 1. Simulate legacy database state: candles_1s defined with `first(price, ts)`
+    // Start from the legacy timestamp-ordered aggregate.
     let _ =
         sqlx::query("SELECT remove_continuous_aggregate_policy('candles_1s', if_exists => true)")
             .execute(&pool)
@@ -528,7 +529,7 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         "legacy view definition should not contain 'seq'"
     );
 
-    // 2. Insert historical trades outside the 1-hour policy window (3 hours ago)
+    // Seed history older than the refresh policy's one-hour window.
     // with identical timestamps and distinct prices to test sequence tie-breaking.
     let _ = sqlx::query("DELETE FROM trades WHERE seq >= 50_000_000")
         .execute(&pool)
@@ -552,10 +553,7 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         .unwrap();
     }
 
-    // 3. Execute schema upgrade: run db/schema.sql to test the actual schema.sql upgrade path!
-    // This executes the DO $$ upgrade block, recreates candles_1s with sequence ordering,
-    // restores the continuous aggregate policy, and runs the top-level backfill:
-    // CALL refresh_continuous_aggregate('candles_1s', NULL, NULL);
+    // Exercise the installation's schema upgrade, including its top-level backfill.
     let schema_sql = include_str!("../../../db/schema.sql");
     for stmt in split_sql_statements(schema_sql) {
         sqlx::raw_sql(&stmt)
@@ -566,7 +564,6 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
             });
     }
 
-    // 4. Verify upgraded view definition uses `seq`
     let upgraded_row: (String,) = sqlx::query_as("SELECT pg_get_viewdef('candles_1s'::regclass)")
         .fetch_one(&pool)
         .await
@@ -576,8 +573,7 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
         "upgraded view definition must contain 'seq'"
     );
 
-    // 5. Verify historical recovery: older candle data (3 hours old) must be queryable
-    // and correctly ordered by sequence number via the backfill procedure!
+    // Backfill must restore the historical bucket in sequence order.
     let hist_candle: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
         "SELECT open, high, low, close, volume FROM candles_1s WHERE bucket = to_timestamp($1 / 1000.0)",
     )
@@ -594,7 +590,7 @@ async fn database_upgrade_migration_rebuilds_legacy_timestamp_aggregate_to_seque
     assert_eq!(close, 210, "historical close must follow seq 50_000_002");
     assert_eq!(volume, 25, "historical volume must sum 10 + 15");
 
-    // 6. Verify continuous aggregate policy is restored and functional
+    // The upgrade also restores scheduled refreshes.
     let policy_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate'",
     )

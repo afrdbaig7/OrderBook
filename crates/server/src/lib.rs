@@ -1,5 +1,4 @@
-//! `server` library: wires the single-writer engine thread, the synthetic
-//! feed, the WebSocket/HTTP surface and the batched persistence writer.
+//! Runs the matching thread, synthetic feed, HTTP/WebSocket API, and persistence.
 //!
 //! ```text
 //!  feed task (tokio)              engine thread (std)          broadcast (tokio)
@@ -11,10 +10,9 @@
 //!                       └── order commands ──► trades ──try_send──► db writer (tokio) ──► TimescaleDB
 //! ```
 //!
-//! Threading: the engine runs on its **own OS thread** (no Tokio, no locks on
-//! the book). Everything else is Tokio. The only communication is bounded
-//! channels, so a slow WebSocket or database client exerts backpressure
-//! (drop + count) instead of stalling the matcher.
+//! One OS thread owns the book; Tokio handles networking and persistence.
+//! Bounded channels limit queued work. Slow sockets disconnect, and persistence
+//! overflow drops trades and increments a counter.
 
 pub mod api;
 pub mod db;
@@ -41,13 +39,11 @@ use crate::engine_thread::{EngineCommand, ServerEvent, TradeRow};
 use crate::metrics::Metrics;
 use crate::state::{AppState, Persistence};
 
-/// Bound on queued engine commands. Large enough to absorb feed bursts,
-/// small enough to surface sustained overload (`feed_drops`).
+/// Maximum queued engine commands; excess feed commands count as `feed_drops`.
 pub const ENGINE_CHANNEL_CAPACITY: usize = 100_000;
 /// Bound on queued trade rows awaiting persistence.
 pub const PERSIST_CAPACITY: usize = 100_000;
-/// Per-subscriber buffer for live messages. Overflowing it decreases
-/// `/health`-visible `clients` by closing lagging sockets.
+/// Broadcast ring capacity. Receivers that fall behind are disconnected.
 pub const BROADCAST_CAPACITY: usize = 65_536;
 
 /// Command-line configuration for the server.
@@ -89,7 +85,7 @@ pub struct Args {
 }
 
 impl Args {
-    /// Validates startup parameters against strict operating bounds.
+    /// Checks startup configuration before any tasks are started.
     pub fn validate(&self) -> Result<(), String> {
         if self.port == 0 {
             return Err("port must be greater than 0".to_string());
@@ -235,16 +231,15 @@ pub async fn run(args: Args) {
         .await
         .expect("server error");
 
-    // ── Graceful shutdown (strictly ordered with bounded timeout) ───────
+    // Stop producers before draining the engine and persistence queues.
     info!("initiating graceful shutdown sequence");
     let shutdown_timeout = Duration::from_secs(10);
     let shutdown_work = async {
-        // 1. Stop the feed and wait for it to stop
         let _ = shutdown_tx.send(true);
         let _ = feed_handle.await;
         info!("feed task stopped");
 
-        // 2. Tell the engine to finish its queued commands and exit
+        // Queue shutdown after all accepted feed commands.
         loop {
             match cmd_tx.try_send(EngineCommand::Shutdown) {
                 Ok(()) => break,
@@ -261,7 +256,7 @@ pub async fn run(args: Args) {
             info!("engine thread finished all queued commands and exited");
         }
 
-        // 3. Let persistence writer drain until disconnected then flush
+        // The engine drops its trade sender on exit, allowing the writer to drain.
         if let Some(handle) = db_handle {
             let _ = handle.await;
             info!("persistence writer drained, flushed, and exited");

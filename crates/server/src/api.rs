@@ -19,7 +19,7 @@ pub struct HealthResponse {
     pub command_channel_depth: usize,
     /// Current target feed rate in orders/second.
     pub feed_rate: u64,
-    /// `true` when a `DATABASE_URL` was configured.
+    /// Whether a persistence connection pool has been initialized.
     pub persistence_enabled: bool,
     #[serde(flatten)]
     pub metrics: MetricsSnapshot,
@@ -73,10 +73,10 @@ pub struct CandlesResponse {
     pub candles: Vec<Candle>,
 }
 
-/// Maximum allowed feed rate in orders/second to prevent unbounded resource consumption.
+/// Upper bound for feed-rate updates, in orders per second.
 pub const MAX_FEED_RATE: u64 = 100_000;
 
-/// Maximum allowed candle query range in milliseconds (24 hours of 1-second candles = 86,400 bars).
+/// Longest candle query window: 24 hours, in milliseconds.
 pub const MAX_CANDLE_RANGE_MS: i64 = 86_400 * 1_000;
 
 /// Reads 1-second candles from the TimescaleDB continuous aggregate over `[from, to)`.

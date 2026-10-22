@@ -1,10 +1,8 @@
-//! Differential testing against an independent naive reference matcher.
+//! Differential tests against a simple reference matcher.
 //!
-//! Verifies Requirement 9:
-//! An independent, slow, naive reference implementation that stores orders in
-//! flat lists, matches via naive linear scans and sorting, and compares
-//! randomized command sequences against `OrderBook`. This proves freedom from
-//! matching bugs, not just internal determinism.
+//! The reference stores orders in flat lists and sorts them before matching.
+//! Comparing randomized command sequences checks execution behavior independently
+//! of the production book's data structures.
 
 use engine::{Event, Fill, Order, OrderBook, OrderId, Price, RejectReason, Side};
 use proptest::prelude::*;
@@ -15,7 +13,7 @@ struct NaiveOrder {
     arrival_seq: u64,
 }
 
-/// Naive, straightforward reference matcher.
+/// Reference matcher using flat order lists.
 #[derive(Default, Debug, Clone)]
 struct NaiveMatcher {
     bids: Vec<NaiveOrder>,

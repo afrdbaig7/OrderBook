@@ -1,12 +1,10 @@
-//! Limit order book matching engine (price-time priority).
+//! Single-symbol order book with price-time priority.
 //!
-//! Single-threaded: the engine thread owns the book exclusively.
-//! Bids and asks are stored in `BTreeMap`s for logarithmic best-price queries
-//! and ordered traversal. An order index (`HashMap<OrderId, (Side, Price)>`)
-//! enables direct O(1) level lookup on cancellation.
+//! `BTreeMap`s keep prices ordered. A hash index locates an order's side and
+//! price; cancellation then looks up that level and scans its FIFO queue.
 //!
-//! All state transitions emit strictly sequenced events (`seq` increments by 1
-//! per event, including rejects and cancels).
+//! The caller owns the book exclusively. Every emitted event, including
+//! rejects and cancels, consumes one sequence number.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -37,7 +35,7 @@ pub struct Snapshot {
 /// Invariants (property-tested in `tests/properties.rs`):
 ///
 /// 1. Never crossed: `best_bid < best_ask` whenever both sides are non-empty.
-/// 2. Quantity conservation: submitted = filled + cancelled + dropped + resting.
+/// 2. Quantity conservation: submitted = 2 * trade quantity + cancelled + dropped + resting.
 /// 3. `index` contains exactly the resting orders, mapped to their real level.
 /// 4. Determinism: same commands ⇒ identical events and identical state.
 /// 5. No empty levels are ever stored.
@@ -81,9 +79,6 @@ impl OrderBook {
         seq
     }
 
-    //
-    // Accessors
-    //
     /// Highest bid price, if any.
     #[inline]
     pub fn best_bid(&self) -> Option<Price> {
@@ -106,7 +101,7 @@ impl OrderBook {
         &self.asks
     }
 
-    /// Lookup a resting order (O(level depth)).
+    /// Finds a resting order in O(log P + L), for P levels and L orders at its level.
     pub fn order(&self, id: OrderId) -> Option<&Order> {
         let &(side, price) = self.index.get(&id)?;
         let levels = match side {
@@ -144,9 +139,8 @@ impl OrderBook {
             .sum()
     }
 
-    /// Snapshot view of the book; best prices first on each side.
-    /// If `depth == 0`, captures the complete book without truncation.
-    /// If `depth > 0`, takes at most `depth` levels per side.
+    /// Returns best prices first, with at most `depth` levels per side.
+    /// A depth of zero includes the complete book.
     pub fn snapshot(&self, depth: usize) -> Snapshot {
         let (bid_limit, ask_limit) = if depth == 0 {
             (self.bids.len(), self.asks.len())
@@ -178,10 +172,6 @@ impl OrderBook {
             Side::Ask => self.best_ask(),
         }
     }
-
-    // -------------------------------------------------------------------
-    // Commands
-    // -------------------------------------------------------------------
 
     /// Submits a limit order.
     ///
@@ -396,10 +386,6 @@ impl OrderBook {
             },
         ]
     }
-
-    // -------------------------------------------------------------------
-    // Internals
-    // -------------------------------------------------------------------
 
     /// Validation for newly submitted orders (cancel has its own path).
     fn reject_new_order(&self, id: OrderId, price: Price, qty: u64) -> Option<RejectReason> {

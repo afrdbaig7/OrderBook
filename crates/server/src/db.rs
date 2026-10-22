@@ -1,19 +1,11 @@
 //! Batched TimescaleDB persistence for executed trades.
 //!
-//! # Design
+//! The engine uses `try_send` so it never waits for database writes. This task
+//! flushes at [`BATCH_ROWS`] rows or after [`FLUSH_INTERVAL`] with a pending batch.
+//! Channel overflow and failed inserts count as persistence drops.
 //!
-//! * The engine thread pushes [`TradeRow`]s with `try_send` into a **bounded**
-//!   `crossbeam-channel`. It never awaits the database.
-//! * This task accumulates rows and flushes with a single `INSERT ... SELECT
-//!   FROM unnest(...)` every [`BATCH_ROWS`] rows **or** every
-//!   [`FLUSH_INTERVAL`], whichever comes first. One round-trip per batch
-//!   keeps the DB from becoming a latency source.
-//! * If the channel is full the engine drops the row and increments a
-//!   counter — under sustained overload persistence degrades, matching never
-//!   stalls.
-//! * Connection uses dialect-independent `unnest`, avoids `chrono`, and
-//!   converts epoch milliseconds with `to_timestamp(ms / 1000.0)`. The
-//!   `trades` hypertable's `ts` column is `TIMESTAMPTZ`.
+//! Each batch uses PostgreSQL `unnest` for one insert round trip. Timestamps
+//! arrive as epoch milliseconds and are stored as `TIMESTAMPTZ`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,15 +25,14 @@ const BATCH_ROWS: usize = 1000;
 /// ...or after this long with a non-empty buffer.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 
-/// One `INSERT ... unnest` for a whole batch. Columns are cast explicitly so
-/// `sum(qty)`-style numerics never leak into the writer.
+/// Inserts a batch using typed arrays, converting milliseconds to timestamps.
 const INSERT_SQL: &str = "\
 INSERT INTO trades (ts, seq, price, qty, taker_side)
 SELECT to_timestamp(ms / 1000.0), seq, price, qty, side
 FROM unnest($1::bigint[], $2::bigint[], $3::bigint[], $4::bigint[], $5::smallint[])
      AS batch(ms, seq, price, qty, side)";
 
-/// Runs the persistence writer until the channel closes or `shutdown` fires.
+/// Connects to the database, then drains trades until the engine channel closes.
 pub async fn run(
     url: String,
     rx: Receiver<TradeRow>,
@@ -62,7 +53,7 @@ pub async fn run(
     let mut batch: Vec<TradeRow> = Vec::with_capacity(BATCH_ROWS);
     let mut flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
     loop {
-        // Flush if the elapsed time deadline expired while holding buffered rows
+        // Check the deadline even when trades arrive continuously.
         let now = tokio::time::Instant::now();
         if !batch.is_empty() && now >= flush_deadline {
             flush(&pool, &mut batch, &metrics).await;

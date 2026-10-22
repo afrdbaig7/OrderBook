@@ -1,5 +1,5 @@
-// scripts/ws_probe.mjs — Lightweight WebSocket probe for smoke tests.
-// Runs with vanilla Node.js (v20+ has global WebSocket built-in).
+// Checks snapshot bootstrap and sequence contiguity through the proxy.
+// Node 20 needs --experimental-websocket; the smoke scripts supply it.
 
 const url = process.argv[2] || 'ws://127.0.0.1:15173/ws';
 const targetCount = parseInt(process.argv[3] || '25', 10);
@@ -41,7 +41,7 @@ ws.onmessage = (event) => {
     } else {
       if (typeof data.seq === 'number') {
         if (data.seq <= lastSeq) {
-          // Event already covered by snapshot or out of order
+          // Bootstrap filtering should already have removed stale events.
           console.error(`[ws_probe] Non-monotonic sequence: got ${data.seq}, last was ${lastSeq}`);
           process.exit(1);
         }

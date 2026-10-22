@@ -1,17 +1,15 @@
 //! Criterion benchmarks for the matching engine.
 //!
-//! Four workloads × three depth variants:
+//! Book workloads at several starting depths, plus cancellation at different
+//! queue lengths:
 //!
 //! * `insert_noncrossing` — resting limit orders (book grows)
 //! * `match_sweep`        — one marketable limit sweeping the whole side
 //! * `cancel_order`       — cancel one resting order
 //! * `mixed_script`       — 60% limit / 30% cancel / 10% market, 500-op batch
 //!
-//! Methodology: template construction, book cloning **and book teardown**
-//! all happen outside the timer. `iter_batched_ref` is used (not
-//! `iter_batched`) because the latter moves the input book into the routine
-//! and drops it inside the timed window — at 100k depth that teardown cost
-//! dominates the actual engine call. Only the engine call(s) are measured.
+//! `iter_batched_ref` keeps template construction, cloning, and book teardown
+//! outside the timer. Event vectors are discarded inside the timed routine.
 //!
 //! Run with: `cargo bench -p bench`
 

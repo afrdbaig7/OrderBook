@@ -1,20 +1,11 @@
 import type { Candle } from "../hooks/useCandles";
 
 /**
- * Reconciles historical candles fetched from TimescaleDB with local client buckets.
+ * Repairs settled candles from history while preserving the active live close.
  *
- * Rules:
- * 1. For any completed candle (candle.ts < activeSecondTs), the historical candle from
- *    TimescaleDB is authoritative: it completely replaces the bucket (including open,
- *    high, low, close, volume), repairing any trades missed during disconnects.
- * 2. For the currently active candle (candle.ts === activeSecondTs), live trade updates
- *    take precedence for the latest close:
- *    - open: preserved from existing live open or history
- *    - high: Math.max(existing.high, candle.high)
- *    - low: Math.min(existing.low, candle.low)
- *    - close: existing.close (the latest live trade of the ongoing second)
- *    - volume: Math.max(existing.volume, candle.volume)
- * 3. Prunes buckets outside the rolling retention window (maxTs - seconds * 1000).
+ * History restores trades missed during a disconnect. For an active bucket,
+ * merge its range and volume without overwriting newer live prices.
+ * Retention is measured from the latest historical bucket.
  */
 export function reconcileHistoryCandles(
   buckets: Map<number, Candle>,
@@ -22,20 +13,20 @@ export function reconcileHistoryCandles(
   activeSecondTs: number,
   retentionSeconds: number
 ): void {
-  let maxTs = 0;
+  let latestHistoryTs = 0;
 
   for (const candle of history) {
-    if (candle.ts > maxTs) {
-      maxTs = candle.ts;
+    if (candle.ts > latestHistoryTs) {
+      latestHistoryTs = candle.ts;
     }
     const existing = buckets.get(candle.ts);
     if (!existing) {
       buckets.set(candle.ts, { ...candle });
     } else if (candle.ts < activeSecondTs) {
-      // Completed candle: authoritative history completely replaces local bucket
+      // Settled history repairs any trades missed while disconnected.
       buckets.set(candle.ts, { ...candle });
     } else {
-      // In-progress active candle: merge high/low/volume but preserve the latest live trade close
+      // The live close may be newer than this response.
       existing.open = existing.open || candle.open;
       existing.high = Math.max(existing.high, candle.high);
       existing.low = Math.min(existing.low, candle.low);
@@ -43,9 +34,8 @@ export function reconcileHistoryCandles(
     }
   }
 
-  // Prune buckets to the fixed rolling history window (e.g. 120s)
-  if (maxTs > 0) {
-    const cutoff = maxTs - retentionSeconds * 1000;
+  if (latestHistoryTs > 0) {
+    const cutoff = latestHistoryTs - retentionSeconds * 1000;
     for (const key of buckets.keys()) {
       if (key < cutoff) {
         buckets.delete(key);

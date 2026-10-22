@@ -1,10 +1,7 @@
-//! Tests for graceful shutdown ordering.
+//! Engine queue draining during shutdown.
 //!
-//! Verifies Requirement 2:
-//! When shutdown begins while commands remain queued in the engine channel,
-//! the engine finishes all queued commands, emits all resulting trades to the
-//! DB channel, and only drops `db_tx` when done. The DB writer drains until
-//! channel disconnect, ensuring zero trade loss upon shutdown.
+//! Queued commands finish before the engine drops its trade sender. A simulated
+//! persistence consumer drains those trades until the channel disconnects.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -82,10 +79,9 @@ async fn shutdown_drains_queued_engine_commands_and_trades() {
         received
     });
 
-    // 1. Tell components shutdown is requested
+    // Request shutdown while work is still queued.
     let _ = shutdown_tx.send(true);
 
-    // 2. Wait for engine thread to join
     let engine_join = tokio::task::spawn_blocking(move || engine_handle.join());
     let join_result = tokio::time::timeout(Duration::from_secs(5), engine_join)
         .await
@@ -93,7 +89,6 @@ async fn shutdown_drains_queued_engine_commands_and_trades() {
         .expect("join handle ok");
     assert!(join_result.is_ok(), "engine thread panicked");
 
-    // 3. Wait for writer task to finish draining until Disconnected
     let written = tokio::time::timeout(Duration::from_secs(5), writer_task)
         .await
         .expect("writer task timed out")
