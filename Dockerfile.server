@@ -15,6 +15,7 @@ COPY crates/engine/ crates/engine/
 COPY crates/feed/ crates/feed/
 COPY crates/bench/ crates/bench/
 COPY crates/server/ crates/server/
+COPY crates/replay/ crates/replay/
 
 # Compile server binary in release mode with locked dependencies
 RUN cargo build --release --locked -p server --bin server

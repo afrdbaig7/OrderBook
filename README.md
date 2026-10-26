@@ -70,6 +70,7 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 | **`feed`** | [`crates/feed`](crates/feed) | Wire protocol serialization, deterministic synthetic order flow, and reference client-side book reconstruction (`ClientBook`). Enforces `#![forbid(unsafe_code)]`. |
 | **`server`** | [`crates/server`](crates/server) | Dedicated OS matching thread, Tokio async runtime, WebSocket/HTTP endpoints, bounded channel coordination, metrics, and batched TimescaleDB writer. |
 | **`bench`** | [`crates/bench`](crates/bench) | Criterion micro-benchmarks and HDR histogram latency harness. |
+| **`replay`** | [`crates/replay`](crates/replay) | Offline command recording and verification of engine events and final state. |
 | **`web`** | [`web`](web) | Vite, React, and TypeScript dashboard: live depth ladder, trade tape, 1s candlestick chart (`lightweight-charts`), and feed rate control. |
 
 ### Synchronization & Backpressure Model
@@ -137,6 +138,33 @@ Measured over localhost loopback from server event timestamp (immediately post-m
 *Stream Health over 60 seconds at 5,000 orders/s: 298,185 messages, 84,413 trades, 0 sequence gaps, client synchronized throughout.*
 
 ---
+
+## Command Recording and Replay
+
+Run a recorded scenario without a server or database:
+
+```bash
+cargo run --locked -p replay -- verify docs/recordings/basic.recording.jsonl
+```
+
+The example covers FIFO partial fills, cancellation, unfilled market quantity,
+and rejected commands. Verification compares every engine event (including
+maker/taker IDs) and the complete final snapshot.
+
+To create a recording from your own JSON Lines command file:
+
+```bash
+cargo run --locked -p replay -- record --commands docs/recordings/basic.commands.jsonl --output my-recording.jsonl
+cargo run --locked -p replay -- verify my-recording.jsonl
+```
+
+Output files must be new; the recorder refuses to overwrite existing files.
+Missing records, incomplete output, unsupported versions, and mismatched
+results fail verification with a nonzero exit code.
+
+This first version records offline scenarios from an empty book. It does not
+capture the running server or provide crash recovery. See [the recording format
+and API](docs/REPLAY.md) for details and limits.
 
 ## Native Development Workflows
 

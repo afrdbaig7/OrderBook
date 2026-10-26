@@ -1,0 +1,11 @@
+{"record":"header","version":1,"producer_version":"0.1.0"}
+{"record":"command","index":1,"command":{"type":"limit","id":1,"side":"ask","price":105,"qty":10},"events":[{"type":"ack","seq":1,"id":1},{"type":"delta","seq":2,"side":"ask","price":105,"qty":10}]}
+{"record":"command","index":2,"command":{"type":"limit","id":2,"side":"ask","price":105,"qty":5},"events":[{"type":"ack","seq":3,"id":2},{"type":"delta","seq":4,"side":"ask","price":105,"qty":15}]}
+{"record":"command","index":3,"command":{"type":"limit","id":3,"side":"bid","price":106,"qty":12},"events":[{"type":"ack","seq":5,"id":3},{"type":"fill","seq":6,"fill":{"maker_id":1,"taker_id":3,"price":105,"qty":10},"taker_side":"bid"},{"type":"fill","seq":7,"fill":{"maker_id":2,"taker_id":3,"price":105,"qty":2},"taker_side":"bid"},{"type":"delta","seq":8,"side":"ask","price":105,"qty":3}]}
+{"record":"command","index":4,"command":{"type":"limit","id":4,"side":"bid","price":100,"qty":7},"events":[{"type":"ack","seq":9,"id":4},{"type":"delta","seq":10,"side":"bid","price":100,"qty":7}]}
+{"record":"command","index":5,"command":{"type":"cancel","id":4},"events":[{"type":"cancel","seq":11,"id":4},{"type":"delta","seq":12,"side":"bid","price":100,"qty":0}]}
+{"record":"command","index":6,"command":{"type":"market","id":5,"side":"bid","qty":5},"events":[{"type":"ack","seq":13,"id":5},{"type":"fill","seq":14,"fill":{"maker_id":2,"taker_id":5,"price":105,"qty":3},"taker_side":"bid"},{"type":"delta","seq":15,"side":"ask","price":105,"qty":0},{"type":"reject","seq":16,"id":5,"reason":"market_unfilled"}]}
+{"record":"command","index":7,"command":{"type":"cancel","id":999},"events":[{"type":"reject","seq":17,"id":999,"reason":"unknown_cancel"}]}
+{"record":"command","index":8,"command":{"type":"limit","id":6,"side":"bid","price":0,"qty":1},"events":[{"type":"reject","seq":18,"id":6,"reason":"zero_price"}]}
+{"record":"command","index":9,"command":{"type":"limit","id":7,"side":"bid","price":99,"qty":4},"events":[{"type":"ack","seq":19,"id":7},{"type":"delta","seq":20,"side":"bid","price":99,"qty":4}]}
+{"record":"footer","commands":9,"events":20,"snapshot":{"seq":20,"bids":[[99,4]],"asks":[]}}

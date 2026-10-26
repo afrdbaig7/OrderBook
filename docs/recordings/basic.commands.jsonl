@@ -1,0 +1,9 @@
+{"type":"limit","id":1,"side":"ask","price":105,"qty":10}
+{"type":"limit","id":2,"side":"ask","price":105,"qty":5}
+{"type":"limit","id":3,"side":"bid","price":106,"qty":12}
+{"type":"limit","id":4,"side":"bid","price":100,"qty":7}
+{"type":"cancel","id":4}
+{"type":"market","id":5,"side":"bid","qty":5}
+{"type":"cancel","id":999}
+{"type":"limit","id":6,"side":"bid","price":0,"qty":1}
+{"type":"limit","id":7,"side":"bid","price":99,"qty":4}
