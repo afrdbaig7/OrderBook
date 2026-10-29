@@ -5,10 +5,12 @@
 #![forbid(unsafe_code)]
 
 pub mod book;
+pub mod flat;
 pub mod price_level;
 pub mod types;
 
 pub use book::{OrderBook, Snapshot};
+pub use flat::{FlatBook, FlatBookConfig, FlatError};
 pub use price_level::{MatchResult, PriceLevel};
 pub use types::{
     Event, Fill, Order, OrderId, Price, RejectReason, Side, MAX_BOOK_LEVELS_PER_SIDE,
