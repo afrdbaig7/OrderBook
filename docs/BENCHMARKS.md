@@ -147,14 +147,61 @@ Recorded wall: 0.300 s → 3.33 Mops/s.
 - Outlier `max` values (up to 22.76 ms) are OS scheduler / timer noise,
   not engine latency; that is why percentiles are the tracked metric.
 
+## `FlatBook` Evaluation & Hardware TSC Latency Profile (1,000,000 Operations)
+
+The optimized [`FlatBook`](../crates/engine/src/flat/mod.rs) engine is an alternative matching core enforcing strict safe Rust (`#![forbid(unsafe_code)]`). It introduces:
+1. **Preallocated Order Arena**: Contiguous memory with intrusive doubly-linked list pointers (`prev`/`next` order IDs) eliminating `VecDeque` allocations and enabling $O(1)$ queue removal from any position.
+2. **2-Level Hierarchical Bitmapped Price Ladder**: Two `u64` bitmasks covering up to 4,096 tick levels, enabling $O(1)$ best price resolution using CPU `ctz` (`trailing_zeros`) instructions.
+3. **Open-Addressing Order ID Index**: Power-of-two capacity hash table with backward-shift deletion, completely eliminating `BTreeMap` and `HashMap` node allocations.
+
+### Measurement Methodology
+- **Ordered Hardware TSC**: Serializing memory fences (`_mm_lfence` + `__rdtscp` + `_mm_lfence`) measure raw CPU cycles with ~0.32 ns effective resolution.
+- **Thread Pinning**: Dedicated core pinning (`SetThreadAffinityMask` to core 2) ensures 0 core migrations across samples.
+- **Out-of-Bracket State Replenishment**: State mutations for cancellations and sweeps are prepared outside the timing bracket.
+- **Differential Parity Verification**: Every timed sequence runs through a full pre-flight verification against reference `OrderBook` to assert identical events, sequence progression, and snapshot identity.
+
+### 1,000,000-Sample Primary Workload Results
+
+Measured via `cargo run --release -p bench -- evaluate --samples 1000000`:
+
+| Operation | Samples | p50 | p99 | p99.9 | Batch Mean | Max Observed (>1µs, %) | Allocations | Target Status |
+|---|---|---|---|---|---|---|---|---|
+| **Limit Insert (Existing)** | 1,000,000 | 37 ns | **78 ns** | **113 ns** | **14.00 ns** | 249,344 ns (77 >1µs, 0.01%) | **0 (verified)** | p99/p99.9 met (p50 > 25ns) |
+| **Limit Insert (New Level)** | 1,000,000 | 31 ns | **44 ns** | **131 ns** | **14.67 ns** | 356,265 ns (61 >1µs, 0.01%) | **0 (verified)** | p99/p99.9 met (p50 > 25ns) |
+| **Cancel (Queue Front)** | 1,000,000 | 33 ns | **55 ns** | **75 ns** | **22.33 ns** | 52,774 ns (31 >1µs, 0.00%) | **0 (verified)** | **achieved** |
+| **Cancel (Queue Mid)** | 1,000,000 | 33 ns | **55 ns** | **90 ns** | **17.67 ns** | 600,567 ns (64 >1µs, 0.01%) | **0 (verified)** | **achieved** |
+| **Cancel (Queue Tail)** | 1,000,000 | 33 ns | **55 ns** | **81 ns** | **18.67 ns** | 460,286 ns (56 >1µs, 0.01%) | **0 (verified)** | **achieved** |
+| **Unknown-ID Rejection** | 1,000,000 | 25 ns | **28 ns** | **57 ns** | **8.40 ns** | 57,458 ns (33 >1µs, 0.00%) | **0 (verified)** | **achieved** |
+| **Mixed (20% Load)** | 100,000 | 34 ns | **59 ns** | **143 ns** | **25.85 ns** | 51,018 ns (4 >1µs, 0.00%) | **0 (verified)** | **achieved** |
+| **Mixed (50% Load)** | 100,000 | 29 ns | **61 ns** | **119 ns** | **28.65 ns** | 43,434 ns (3 >1µs, 0.00%) | **0 (verified)** | **achieved** |
+| **Mixed (85% Load)** | 100,000 | 28 ns | **63 ns** | **126 ns** | **35.10 ns** | 13,221 ns (7 >1µs, 0.01%) | **0 (verified)** | **achieved** |
+| **Sweep (8 makers)** | 10,000 | 121 ns | 180 ns | 887 ns | **125.76 ns** | 1,294 ns (1 >1µs, 0.01%) | **0 (verified)** | N/A |
+| **Sweep (64 makers)** | 10,000 | 680 ns | 1,101 ns | 1,869 ns | **694.79 ns** | 19,096 ns (142 >1µs, 1.42%) | **0 (verified)** | N/A |
+
+### Empirical Micro-Architectural Bottlenecks
+
+1. **Sweep Traversal Cost**: In a 64-maker sweep, ladder and intrusive queue traversal account for **66.1%** of elapsed time, index deletions account for **23.3%**, and event buffer emission accounts for **10.6%**.
+2. **Hash Collisions**: Because table capacity is dimensioned to $2 \times \text{max\_orders}$, even at 85% book occupancy the index load factor is 42.5%, where 99% of queries encounter $\le 6$ bucket probes.
+3. **Timer Bracket Overhead**: Measuring 200,000 empty brackets reveals a median serialized timer overhead of ~15–18 ns. Thus, individual $p50$ latencies of 31–37 ns reflect ~14–17 ns of genuine engine work.
+
 ## Reproduce
 
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+# Run Criterion benchmark suites (both OrderBook and FlatBook)
 cargo bench -p bench
-cargo run -p bench --release -- --ops 1000000 --warmup 100000 --workload mixed
+
+# Run full 1,000,000-sample empirical FlatBook evaluation
+cargo run --release -p bench -- evaluate --samples 1000000
+
+# Run micro-architectural cost breakdown profiler
+cargo run --release -p bench -- profile
+
+# Calibrate hardware TSC timer against OS monotonic clock
+cargo run --release -p bench -- calibrate --iterations 100000
 ```
 
 Criterion writes plots/estimates under `target/criterion/`.

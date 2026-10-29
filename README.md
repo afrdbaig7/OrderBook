@@ -66,10 +66,10 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 
 | Component | Path | Responsibility |
 |---|---|---|
-| **`engine`** | [`crates/engine`](crates/engine) | Pure matching core: integer prices, FIFO price levels, maker-price execution, sequence assignment, complete snapshots, and property tests. Enforces `#![forbid(unsafe_code)]`. |
+| **`engine`** | [`crates/engine`](crates/engine) | Pure matching core enforcing `#![forbid(unsafe_code)]`. Contains both reference [`OrderBook`](crates/engine/src/book.rs) (`BTreeMap` + `VecDeque`) and ultra-low latency, zero-allocation [`FlatBook`](crates/engine/src/flat/mod.rs) (preallocated order arena, 2-level bitmapped price ladder, open-addressing index). |
 | **`feed`** | [`crates/feed`](crates/feed) | Wire protocol serialization, deterministic synthetic order flow, and reference client-side book reconstruction (`ClientBook`). Enforces `#![forbid(unsafe_code)]`. |
 | **`server`** | [`crates/server`](crates/server) | Dedicated OS matching thread, Tokio async runtime, WebSocket/HTTP endpoints, bounded channel coordination, metrics, and batched TimescaleDB writer. |
-| **`bench`** | [`crates/bench`](crates/bench) | Criterion micro-benchmarks and HDR histogram latency harness. |
+| **`bench`** | [`crates/bench`](crates/bench) | Criterion micro-benchmarks, hardware invariant TSC timer (`_mm_lfence` + `__rdtscp`), HDR histogram latency harness, and micro-architectural profiler. |
 | **`replay`** | [`crates/replay`](crates/replay) | Offline command recording and verification of engine events and final state. |
 | **`web`** | [`web`](web) | Vite, React, and TypeScript dashboard: live depth ladder, trade tape, 1s candlestick chart (`lightweight-charts`), and feed rate control. |
 
@@ -98,11 +98,46 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 
 Detailed methodology, workload descriptions, and instructions to reproduce are documented in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-> **Hardware & Environment**: Intel Core i5-12500H (12 cores / 16 threads), 16 GB RAM, Windows 11, Rust stable toolchain. Baseline measurements reflect commit `8d235ec` with LTO enabled.
+> **Hardware & Environment**: Intel Core i5-12500H (12 cores / 16 threads, base 3.11 GHz), 16 GB RAM, Windows 11, Rust stable toolchain with LTO enabled.
 
-### 1. In-Memory Engine Micro-Benchmarks (Criterion)
+### 1. `FlatBook` Ultra-Low Latency & Tail Latency (1,000,000 Operations)
 
-Measurements reflect single-threaded CPU execution time of library calls on [`OrderBook`](crates/engine/src/book.rs) (excluding network, serialization, and disk I/O):
+The optimized [`FlatBook`](crates/engine/src/flat/mod.rs) engine eliminates all dynamic heap allocations on the hot path using a preallocated contiguous order arena, two-level hierarchical bitmapped price ladder ($O(1)$ best price discovery), and backward-shift open-addressing hash table ($O(1)$ order lookups and deletions).
+
+Timing is captured with an ordered, serializing hardware invariant TSC counter (`_mm_lfence` + `__rdtscp` + `_mm_lfence`) pinned to a dedicated CPU core (`SetThreadAffinityMask`), with state replenishment performed outside the timed window and full event/snapshot parity verified against [`OrderBook`](crates/engine/src/book.rs) prior to timing (`cargo run --release -p bench -- evaluate --samples 1000000`):
+
+| Operation | Workload Description | Samples | p50 | p99 | p99.9 | Batch Mean | Max (Observed) | Heap Allocations | Target Status |
+|---|---|---|---|---|---|---|---|---|---|
+| **Limit Insert (Existing)** | Non-crossing insert into existing level | 1,000,000 | 37 ns | **78 ns** | **113 ns** | **14.00 ns** | 249 µs (0.01% >1µs) | **0 (verified)** | p99/p99.9 met (p50 > 25ns) |
+| **Limit Insert (New Level)** | Non-crossing insert creating new level | 1,000,000 | 31 ns | **44 ns** | **131 ns** | **14.67 ns** | 356 µs (0.01% >1µs) | **0 (verified)** | p99/p99.9 met (p50 > 25ns) |
+| **Cancel (Queue Front)** | Cancellation at front of level | 1,000,000 | 33 ns | **55 ns** | **75 ns** | **22.33 ns** | 53 µs (0.00% >1µs) | **0 (verified)** | **achieved** |
+| **Cancel (Queue Mid)** | Cancellation in middle of level | 1,000,000 | 33 ns | **55 ns** | **90 ns** | **17.67 ns** | 601 µs (0.01% >1µs) | **0 (verified)** | **achieved** |
+| **Cancel (Queue Tail)** | Cancellation at tail of level | 1,000,000 | 33 ns | **55 ns** | **81 ns** | **18.67 ns** | 460 µs (0.01% >1µs) | **0 (verified)** | **achieved** |
+| **Unknown-ID Reject** | Reject unknown cancel order ID | 1,000,000 | 25 ns | **28 ns** | **57 ns** | **8.40 ns** | 57 µs (0.00% >1µs) | **0 (verified)** | **achieved** |
+| **Mixed (20% Load)** | Bounded 60% limit / 30% cancel / 10% market | 100,000 | 34 ns | **59 ns** | **143 ns** | **25.85 ns** | 51 µs (0.00% >1µs) | **0 (verified)** | **achieved** |
+| **Mixed (50% Load)** | Bounded 60% limit / 30% cancel / 10% market | 100,000 | 29 ns | **61 ns** | **119 ns** | **28.65 ns** | 43 µs (0.00% >1µs) | **0 (verified)** | **achieved** |
+| **Mixed (85% Load)** | Bounded 60% limit / 30% cancel / 10% market | 100,000 | 28 ns | **63 ns** | **126 ns** | **35.10 ns** | 13 µs (0.01% >1µs) | **0 (verified)** | **achieved** |
+| **Sweep (8 makers)** | Crossing sweep across 4 levels | 10,000 | 121 ns | 180 ns | 887 ns | 125.76 ns | 1.29 µs (0.01% >1µs) | **0 (verified)** | N/A |
+| **Sweep (64 makers)** | Crossing sweep across 16 levels | 10,000 | 680 ns | 1,101 ns | 1,869 ns | 694.79 ns | 19.1 µs (1.42% >1µs) | **0 (verified)** | N/A |
+
+* **Zero Allocations**: Confirmed in [`crates/engine/tests/flat_zero_alloc.rs`](crates/engine/tests/flat_zero_alloc.rs) via an atomic allocator counter on the hot path.
+* **Single-Op vs. Batch Overhead**: The serializing bracket overhead (`_mm_lfence` + `__rdtscp`) accounts for ~15 ns of single-operation p50 measurements; batched measurements isolate pure execution cost to 14.0–14.7 ns per insert (up to **71.4 Mops/s**).
+
+### 2. Head-to-Head Comparison: Reference `OrderBook` vs. `FlatBook`
+
+| Operation | Baseline [`OrderBook`](crates/engine/src/book.rs) | Optimized [`FlatBook`](crates/engine/src/flat/mod.rs) | Improvement |
+|---|---|---|---|
+| **Limit Insert (Existing Level)** | 255 ns (batch mean) | **14.00 ns** batch mean (p50: 37 ns, p99: 78 ns) | **~18× faster** |
+| **Limit Insert (New Level)** | 266 ns (batch mean) | **14.67 ns** batch mean (p50: 31 ns, p99: 44 ns) | **~18× faster** |
+| **Cancel (Queue Front)** | 350 ns (queue len 4) | **22.33 ns** batch mean (p50: 33 ns, p99: 55 ns) | **~16× faster** |
+| **Cancel (Queue Mid / Tail)** | 580 ns – 2.8 µs ($O(n)$ search) | **17.67–18.67 ns** batch mean (p50: 33 ns, p99: 55 ns) | **~30× to 150× faster** |
+| **Unknown-ID Rejection** | ~200 ns | **8.40 ns** batch mean (p50: 25 ns, p99: 28 ns) | **~24× faster** |
+| **Mixed Workload (60/30/10)** | 231–384 ns / op | **25.85–35.10 ns** batch mean (p50: 28–34 ns, p99: 59–63 ns) | **~9× to 11× faster** |
+| **Hot Path Memory Allocation** | Heap (`VecDeque`, `BTreeMap`) | **0 bytes (zero heap allocations)** | **Deterministic memory footprint** |
+
+### 3. Reference `OrderBook` In-Memory Micro-Benchmarks (Criterion)
+
+Historical baseline single-threaded CPU execution time of library calls on [`OrderBook`](crates/engine/src/book.rs) (excluding network, serialization, and disk I/O):
 
 | Operation | Depth 10 | Depth 1,000 | Depth 100,000 |
 |---|---|---|---|
@@ -110,13 +145,9 @@ Measurements reflect single-threaded CPU execution time of library calls on [`Or
 | **`match_sweep`** | **4.69 µs** | **382 µs** | **75.75 ms** |
 | **`cancel` (short queue)** | **378 ns** | **857 ns** | **4.86 µs** |
 
-* **Workload Scope**: The ~255 ns figure represents the *average amortized insertion cost* of adding a growing batch of 1,000 distinct price levels starting from depth 10.
-* **Queue Length Cancellation**: Orders at a single price level are stored in a `VecDeque`, requiring an $O(n)$ search to cancel mid-queue. Measured scaling across queue depths (via `bench_cancel_queue_length`):
-  * 4 orders/level: **~350 ns**
-  * 50 orders/level: **~580 ns**
-  * 500 orders/level: **~2.8 µs**
+* **Queue Length Cancellation Scaling**: In [`OrderBook`](crates/engine/src/book.rs), orders at a single price level are stored in a `VecDeque`, requiring an $O(n)$ search to cancel mid-queue (4 orders: ~350 ns; 50 orders: ~580 ns; 500 orders: ~2.8 µs). [`FlatBook`](crates/engine/src/flat/mod.rs) replaces this with intrusive doubly-linked list nodes, achieving constant-time $O(1)$ cancellation across all queue positions.
 
-### 2. Server Throughput & Persistence Overhead
+### 4. Server Throughput & Persistence Overhead
 
 Matching throughput measured over 1,000,000 synthetic events:
 
@@ -124,7 +155,7 @@ Matching throughput measured over 1,000,000 synthetic events:
 * **Engine with TimescaleDB writer attached**: **2,133,230 events/second** ($\pm 0.3\%$ difference)
 * **Trades persisted**: 1,000,082 trades generated and persisted with **0 dropped trades**.
 
-### 3. End-to-End WebSocket Delivery Latency (HDR Histogram)
+### 5. End-to-End WebSocket Delivery Latency (HDR Histogram)
 
 Measured over localhost loopback from server event timestamp (immediately post-match) to client receipt and JSON parsing (excludes engine matching and inbound network transit):
 
