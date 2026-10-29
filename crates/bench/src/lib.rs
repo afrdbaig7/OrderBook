@@ -4,6 +4,12 @@
 //! Every generator is seeded (`ChaCha8Rng`) so runs are reproducible across
 //! processes and machines. Prices are integer ticks around [`BASE_PRICE`].
 
+pub mod calibrate;
+pub mod harness;
+pub mod profile_costs;
+pub mod timer;
+pub mod workload;
+
 use engine::{Order, OrderBook, OrderId, Price, Side};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -51,6 +57,11 @@ pub fn bid_depth(depth: u64, per_level: u64) -> OrderBook {
 }
 
 fn side_depth(side: Side, depth: u64, per_level: u64) -> OrderBook {
+    assert!(
+        depth <= engine::MAX_BOOK_LEVELS_PER_SIDE as u64,
+        "depth ({depth}) exceeds MAX_BOOK_LEVELS_PER_SIDE ({})",
+        engine::MAX_BOOK_LEVELS_PER_SIDE
+    );
     let mut book = OrderBook::new();
     let mut id = 1u64;
     for i in 0..depth {
@@ -59,15 +70,27 @@ fn side_depth(side: Side, depth: u64, per_level: u64) -> OrderBook {
             Side::Bid => BASE_PRICE.saturating_sub(1 + i),
         };
         for _ in 0..per_level {
-            book.submit_limit(Order {
+            let events = book.submit_limit(Order {
                 id: OrderId(id),
                 side,
                 price: Price(price),
                 qty: 10,
             });
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [engine::Event::Ack { .. }, engine::Event::Delta { .. }]
+                ),
+                "expected Ack + Delta during template setup, got {events:?}"
+            );
             id += 1;
         }
     }
+    match side {
+        Side::Ask => assert_eq!(book.ask_levels().len(), depth as usize),
+        Side::Bid => assert_eq!(book.bid_levels().len(), depth as usize),
+    }
+    assert_eq!(book.index_len(), (depth * per_level) as usize);
     book
 }
 
@@ -75,30 +98,52 @@ fn side_depth(side: Side, depth: u64, per_level: u64) -> OrderBook {
 /// `depth` bid levels below it, `per_level` orders each.
 /// Bid ids run after ask ids so ids stay unique.
 pub fn two_sided(depth: u64, per_level: u64) -> OrderBook {
+    assert!(
+        depth <= engine::MAX_BOOK_LEVELS_PER_SIDE as u64,
+        "depth ({depth}) exceeds MAX_BOOK_LEVELS_PER_SIDE ({})",
+        engine::MAX_BOOK_LEVELS_PER_SIDE
+    );
     let mut book = OrderBook::new();
     let mut id = 1u64;
     for i in 0..depth {
         for _ in 0..per_level {
-            book.submit_limit(Order {
+            let events = book.submit_limit(Order {
                 id: OrderId(id),
                 side: Side::Ask,
                 price: Price(BASE_PRICE + i),
                 qty: 10,
             });
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [engine::Event::Ack { .. }, engine::Event::Delta { .. }]
+                ),
+                "expected Ack + Delta during template setup, got {events:?}"
+            );
             id += 1;
         }
     }
     for i in 0..depth {
         for _ in 0..per_level {
-            book.submit_limit(Order {
+            let events = book.submit_limit(Order {
                 id: OrderId(id),
                 side: Side::Bid,
                 price: Price(BASE_PRICE.saturating_sub(1 + i)),
                 qty: 10,
             });
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [engine::Event::Ack { .. }, engine::Event::Delta { .. }]
+                ),
+                "expected Ack + Delta during template setup, got {events:?}"
+            );
             id += 1;
         }
     }
+    assert_eq!(book.ask_levels().len(), depth as usize);
+    assert_eq!(book.bid_levels().len(), depth as usize);
+    assert_eq!(book.index_len(), (depth * per_level * 2) as usize);
     book
 }
 
