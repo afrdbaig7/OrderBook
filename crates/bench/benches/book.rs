@@ -20,45 +20,82 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughpu
 use bench::{ask_depth, ask_qty, bid_depth, mixed_script, two_sided, BASE_PRICE};
 use engine::{Order, OrderBook, OrderId, Price, Side};
 
-const DEPTHS: [u64; 3] = [10, 1_000, 100_000];
+const DEPTHS: [u64; 3] = [10, 1_000, 10_000];
 const PER_LEVEL: u64 = 4;
 const INSERT_BATCH: u64 = 1_000;
 const MIXED_LEN: usize = 500;
 
-/// Depth >= 100k makes template clones expensive; cut sample count so the
+/// Depth >= 10k makes template clones expensive; cut sample count so the
 /// suite stays practical while still producing stable medians.
 fn tune(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>, depth: u64) {
-    if depth >= 100_000 {
+    if depth >= 10_000 {
         group.sample_size(20);
-        group.measurement_time(std::time::Duration::from_secs(10));
+        group.measurement_time(std::time::Duration::from_secs(5));
     }
 }
 
-/// Non-crossing resting limits against a bid-only template of `depth`
-/// levels. Metric: one iteration = 1,000 resting inserts.
+/// Non-crossing resting limits against a bid-only template of `depth` levels.
+/// Separates new-level creation from existing-level additions, and asserts
+/// that timed commands are accepted (no silent rejects).
 fn bench_insert(c: &mut Criterion) {
     for depth in DEPTHS {
         let template = bid_depth(depth, PER_LEVEL);
+        assert_eq!(template.bid_levels().len(), depth as usize);
+        assert_eq!(template.index_len(), (depth * PER_LEVEL) as usize);
+
         let base_id = depth * PER_LEVEL + 1;
-        let mut group = c.benchmark_group(format!("insert_noncrossing/depth_{depth}"));
+        let mut group = c.benchmark_group(format!("insert/depth_{depth}"));
         tune(&mut group, depth);
+
+        // 1. New level insertion: each order creates a brand-new price level
+        if depth + INSERT_BATCH <= engine::MAX_BOOK_LEVELS_PER_SIDE as u64 {
+            group.throughput(Throughput::Elements(INSERT_BATCH));
+            group.bench_function("new_levels_batch_1000", |b| {
+                b.iter_batched_ref(
+                    || template.clone(),
+                    |book| {
+                        for i in 0..INSERT_BATCH {
+                            let events = book.submit_limit(Order {
+                                id: OrderId(base_id + i),
+                                side: Side::Bid,
+                                price: Price(BASE_PRICE.saturating_sub(depth + 1 + i)),
+                                qty: 5,
+                            });
+                            debug_assert!(matches!(
+                                events.as_slice(),
+                                [engine::Event::Ack { .. }, engine::Event::Delta { .. }]
+                            ));
+                        }
+                    },
+                    BatchSize::SmallInput,
+                )
+            });
+        }
+
+        // 2. Existing level insertion: orders add to already existing price levels
         group.throughput(Throughput::Elements(INSERT_BATCH));
-        group.bench_function("batch_1000", |b| {
+        group.bench_function("existing_levels_batch_1000", |b| {
             b.iter_batched_ref(
                 || template.clone(),
                 |book| {
                     for i in 0..INSERT_BATCH {
-                        book.submit_limit(Order {
+                        let level_idx = i % depth;
+                        let events = book.submit_limit(Order {
                             id: OrderId(base_id + i),
                             side: Side::Bid,
-                            price: Price(BASE_PRICE + 10_000 + i), // no asks: never crosses
+                            price: Price(BASE_PRICE.saturating_sub(1 + level_idx)),
                             qty: 5,
                         });
+                        debug_assert!(matches!(
+                            events.as_slice(),
+                            [engine::Event::Ack { .. }, engine::Event::Delta { .. }]
+                        ));
                     }
                 },
                 BatchSize::SmallInput,
             )
         });
+
         group.finish();
     }
 }
@@ -68,6 +105,7 @@ fn bench_insert(c: &mut Criterion) {
 fn bench_match(c: &mut Criterion) {
     for depth in DEPTHS {
         let template = ask_depth(depth, PER_LEVEL);
+        assert_eq!(template.ask_levels().len(), depth as usize);
         let sweep_qty = ask_qty(&template);
         let mut group = c.benchmark_group(format!("match_sweep/depth_{depth}"));
         tune(&mut group, depth);
@@ -76,12 +114,13 @@ fn bench_match(c: &mut Criterion) {
             b.iter_batched_ref(
                 || template.clone(),
                 |book| {
-                    book.submit_limit(Order {
+                    let events = book.submit_limit(Order {
                         id: OrderId(9_000_000_000),
                         side: Side::Bid,
                         price: Price(BASE_PRICE + depth + 10),
                         qty: sweep_qty,
                     });
+                    debug_assert!(!events.is_empty());
                 },
                 BatchSize::SmallInput,
             )
@@ -90,8 +129,8 @@ fn bench_match(c: &mut Criterion) {
     }
 }
 
-/// Cancel resting orders at front, middle, and back of a level queue.
-/// Metric: one iteration = one `cancel` call.
+/// Cancel resting orders at front, middle, and back of a level queue,
+/// plus unknown-order rejection benchmark.
 fn bench_cancel(c: &mut Criterion) {
     for depth in DEPTHS {
         let template = bid_depth(depth, PER_LEVEL);
@@ -104,7 +143,11 @@ fn bench_cancel(c: &mut Criterion) {
             b.iter_batched_ref(
                 || template.clone(),
                 |book| {
-                    book.cancel(OrderId(1));
+                    let events = book.cancel(OrderId(1));
+                    debug_assert!(matches!(
+                        events.as_slice(),
+                        [engine::Event::Cancel { .. }, engine::Event::Delta { .. }]
+                    ));
                 },
                 BatchSize::SmallInput,
             )
@@ -115,7 +158,11 @@ fn bench_cancel(c: &mut Criterion) {
             b.iter_batched_ref(
                 || template.clone(),
                 |book| {
-                    book.cancel(OrderId(PER_LEVEL / 2));
+                    let events = book.cancel(OrderId(PER_LEVEL / 2));
+                    debug_assert!(matches!(
+                        events.as_slice(),
+                        [engine::Event::Cancel { .. }, engine::Event::Delta { .. }]
+                    ));
                 },
                 BatchSize::SmallInput,
             )
@@ -126,7 +173,29 @@ fn bench_cancel(c: &mut Criterion) {
             b.iter_batched_ref(
                 || template.clone(),
                 |book| {
-                    book.cancel(OrderId(PER_LEVEL));
+                    let events = book.cancel(OrderId(PER_LEVEL));
+                    debug_assert!(matches!(
+                        events.as_slice(),
+                        [engine::Event::Cancel { .. }, engine::Event::Delta { .. }]
+                    ));
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        // Unknown order ID rejection path
+        group.bench_function("unknown_id_reject", |b| {
+            b.iter_batched_ref(
+                || template.clone(),
+                |book| {
+                    let events = book.cancel(OrderId(999_999_999));
+                    debug_assert!(matches!(
+                        events.as_slice(),
+                        [engine::Event::Reject {
+                            reason: engine::RejectReason::UnknownCancel,
+                            ..
+                        }]
+                    ));
                 },
                 BatchSize::SmallInput,
             )
