@@ -15,6 +15,8 @@ use crate::state::AppState;
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
+    /// Active matching engine implementation ("reference" or "flat").
+    pub engine: &'static str,
     /// Depth of the bounded engine input channel (0 ⇒ engine keeping up).
     pub command_channel_depth: usize,
     /// Current target feed rate in orders/second.
@@ -30,6 +32,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let persistence_enabled = state.persistence.read().await.is_some();
     Json(HealthResponse {
         status: "ok",
+        engine: state.engine_type.as_str(),
         command_channel_depth: state.cmd_tx.len(),
         feed_rate: state.feed_rate.load(Ordering::Relaxed),
         persistence_enabled,

@@ -35,9 +35,9 @@ use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::engine_thread::{EngineCommand, ServerEvent, TradeRow};
-use crate::metrics::Metrics;
-use crate::state::{AppState, Persistence};
+pub use crate::engine_thread::{EngineCommand, EngineKind, EngineType, ServerEvent, TradeRow};
+pub use crate::metrics::Metrics;
+pub use crate::state::{AppState, Persistence};
 
 /// Maximum queued engine commands; excess feed commands count as `feed_drops`.
 pub const ENGINE_CHANNEL_CAPACITY: usize = 100_000;
@@ -82,6 +82,18 @@ pub struct Args {
     /// Capacity of the WebSocket broadcast ring buffer (default 65536).
     #[arg(long = "broadcast-capacity", default_value_t = BROADCAST_CAPACITY)]
     pub broadcast_capacity: usize,
+    /// Engine implementation variant: "reference" (dynamic BTreeMap) or "flat" (ultra-low latency, zero allocation).
+    #[arg(long = "engine", value_enum, default_value_t = EngineType::Reference)]
+    pub engine: EngineType,
+    /// Base price tick for FlatBook when --engine flat is used.
+    #[arg(long = "flat-base-price", default_value_t = 98_000)]
+    pub flat_base_price: u64,
+    /// Number of price levels for FlatBook when --engine flat is used.
+    #[arg(long = "flat-tick-count", default_value_t = 4_096)]
+    pub flat_tick_count: usize,
+    /// Maximum resting orders for FlatBook when --engine flat is used.
+    #[arg(long = "flat-max-orders", default_value_t = 16_384)]
+    pub flat_max_orders: usize,
 }
 
 impl Args {
@@ -107,6 +119,23 @@ impl Args {
                 "positive --snapshot-depth ({}) is rejected: bootstrap snapshots must be complete (depth=0) to prevent client desynchronization across boundary changes; configure display limits on the client instead",
                 self.snapshot_depth
             ));
+        }
+        if self.engine == EngineType::Flat {
+            if self.flat_base_price == 0 {
+                return Err("flat-base-price must be greater than 0".to_string());
+            }
+            if self.flat_tick_count == 0 || self.flat_tick_count > 65_536 {
+                return Err(format!(
+                    "flat-tick-count must be between 1 and 65,536, got {}",
+                    self.flat_tick_count
+                ));
+            }
+            if self.flat_max_orders == 0 || self.flat_max_orders > 1_000_000 {
+                return Err(format!(
+                    "flat-max-orders must be between 1 and 1,000,000, got {}",
+                    self.flat_max_orders
+                ));
+            }
         }
         Ok(())
     }
@@ -141,8 +170,22 @@ pub async fn run(args: Args) {
     };
 
     // Single-writer engine, on its own thread.
+    let engine_kind: EngineKind = match args.engine {
+        EngineType::Reference => EngineKind::Reference(OrderBook::new()),
+        EngineType::Flat => {
+            let config = engine::FlatBookConfig {
+                max_orders: args.flat_max_orders,
+                base_price: args.flat_base_price,
+                tick_count: args.flat_tick_count,
+            };
+            let flat = engine::FlatBook::new(config)
+                .expect("failed to initialize FlatBook with configured parameters");
+            EngineKind::Flat(flat)
+        }
+    };
+
     let engine_handle = engine_thread::spawn(
-        OrderBook::new(),
+        engine_kind,
         cmd_rx,
         broadcast_tx.clone(),
         db_tx,
@@ -193,6 +236,7 @@ pub async fn run(args: Args) {
         candle_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         admin_token: args.admin_token,
         allow_public_feed_rate: args.allow_public_feed_rate,
+        engine_type: args.engine,
     };
 
     let router = Router::new()
@@ -210,6 +254,7 @@ pub async fn run(args: Args) {
         .expect("failed to bind listen port");
     info!(
         port = args.port,
+        engine = args.engine.as_str(),
         feed_rate = args.feed_rate,
         seed = args.seed,
         snapshot = "complete",

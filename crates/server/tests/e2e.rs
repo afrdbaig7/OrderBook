@@ -386,6 +386,19 @@ async fn cli_configuration_validation_at_startup() {
         !status_snap_positive.success(),
         "positive snapshot-depth must exit with non-zero code"
     );
+
+    // 5. invalid flat-engine parameters must be rejected
+    let status_flat_invalid = Command::new(bin)
+        .args(["--engine=flat", "--flat-base-price=0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .expect("spawn server");
+    assert!(
+        !status_flat_invalid.success(),
+        "flat-base-price=0 must exit with non-zero code"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -537,6 +550,48 @@ async fn forced_process_kill_with_connected_clients() {
 
 /// Integration test: graceful process shutdown on SIGTERM (Unix only).
 ///
+#[tokio::test(flavor = "multi_thread")]
+async fn live_server_stream_with_flat_engine() {
+    let port = free_port().await;
+    let bin = env!("CARGO_BIN_EXE_server");
+
+    let mut child = Command::new(bin)
+        .args([
+            format!("--port={port}"),
+            "--engine=flat".to_string(),
+            "--flat-base-price=98000".to_string(),
+            "--flat-tick-count=4096".to_string(),
+            "--feed-rate=2000".to_string(),
+            "--seed=42".to_string(),
+            "--allow-public-feed-rate".to_string(),
+        ])
+        .env("RUST_LOG", "warn")
+        .env("RUST_BACKTRACE", "1")
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    wait_for_health(port).await;
+
+    // Verify /health reports flat engine
+    let health = http_request(port, "GET", "/health", "")
+        .await
+        .expect("get /health");
+    assert!(
+        health.contains("\"engine\":\"flat\""),
+        "expected flat engine in /health response, got {health}"
+    );
+
+    // Connect WebSocket and verify contiguous stream with ClientBook reconstruction
+    let mut book = ClientBook::new();
+    assert_continuous_stream(port, &mut book, 100, true).await;
+
+    child.kill().await.expect("kill server");
+    let _ = child.wait().await;
+}
+
 /// Verifies process-level signal handling:
 /// 1. The server handles SIGTERM cooperatively and exits with status code 0 within deadline.
 /// 2. Active WebSocket connections receive a clean protocol Close frame before termination.

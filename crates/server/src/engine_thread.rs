@@ -10,12 +10,73 @@ use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender};
-use engine::{Event, OrderBook, Side};
+use engine::{Event, FlatBook, OrderBook, Side, Snapshot};
 use feed::Command;
 use tokio::sync::oneshot;
 use tracing::warn;
 
 use crate::metrics::Metrics;
+
+/// Identifies the matching engine implementation.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineType {
+    /// Standard dynamic BTreeMap + VecDeque reference engine.
+    Reference,
+    /// Ultra-low latency, zero-allocation preallocated arena + bitmap engine.
+    Flat,
+}
+
+impl EngineType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Flat => "flat",
+        }
+    }
+}
+
+impl std::fmt::Display for EngineType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Dynamic or flat matching engine core managed exclusively by the engine thread.
+pub enum EngineKind {
+    Reference(OrderBook),
+    Flat(FlatBook),
+}
+
+impl From<OrderBook> for EngineKind {
+    fn from(book: OrderBook) -> Self {
+        Self::Reference(book)
+    }
+}
+
+impl From<FlatBook> for EngineKind {
+    fn from(book: FlatBook) -> Self {
+        Self::Flat(book)
+    }
+}
+
+impl EngineKind {
+    pub fn engine_type(&self) -> EngineType {
+        match self {
+            Self::Reference(_) => EngineType::Reference,
+            Self::Flat(_) => EngineType::Flat,
+        }
+    }
+
+    pub fn snapshot(&self, depth: usize) -> Snapshot {
+        match self {
+            Self::Reference(book) => book.snapshot(depth),
+            Self::Flat(book) => book.snapshot(),
+        }
+    }
+}
 
 /// A fill destined for the `trades` table.
 /// Schema stores prices, not order ids, so there's no `id` field here.
@@ -68,26 +129,56 @@ pub fn now_ms() -> u64 {
 
 /// Spawns the engine thread and returns its join handle.
 pub fn spawn(
-    mut book: OrderBook,
+    engine: impl Into<EngineKind>,
     cmd_rx: Receiver<EngineCommand>,
     broadcast: tokio::sync::broadcast::Sender<Arc<ServerEvent>>,
     db_tx: Option<Sender<TradeRow>>,
     metrics: Arc<Metrics>,
 ) -> JoinHandle<()> {
+    let mut engine = engine.into();
     std::thread::Builder::new()
         .name("engine".to_string())
         .spawn(move || {
+            let mut flat_events = match &engine {
+                EngineKind::Flat(flat) => Vec::with_capacity(flat.worst_case_event_capacity()),
+                EngineKind::Reference(_) => Vec::new(),
+            };
+            let mut ref_events = Vec::new();
+
             let mut handle_command = |command: EngineCommand| -> bool {
                 match command {
                     EngineCommand::Feed(command) => {
                         metrics.add_orders_in(1);
-                        for event in command.apply(&mut book) {
+                        let events: &[Event] = match &mut engine {
+                            EngineKind::Reference(book) => {
+                                ref_events = command.apply(book);
+                                &ref_events
+                            }
+                            EngineKind::Flat(flat) => {
+                                flat_events.clear();
+                                let res = match &command {
+                                    Command::Limit(order) => {
+                                        flat.submit_limit_into(order.clone(), &mut flat_events)
+                                    }
+                                    Command::Market { id, side, qty } => {
+                                        flat.submit_market_into(*id, *side, *qty, &mut flat_events)
+                                    }
+                                    Command::Cancel(id) => flat.cancel_into(*id, &mut flat_events),
+                                };
+                                if let Err(err) = res {
+                                    warn!("FlatBook command error: {err:?}");
+                                }
+                                &flat_events
+                            }
+                        };
+
+                        for event in events {
                             let ts = now_ms();
-                            let message = feed::Message::from_event(&event).with_timestamp(ts);
+                            let message = feed::Message::from_event(event).with_timestamp(ts);
                             let seq = message.seq();
                             let json: Arc<str> = Arc::from(message.encode());
 
-                            let trade = match &event {
+                            let trade = match event {
                                 Event::Fill {
                                     fill, taker_side, ..
                                 } => {
@@ -131,7 +222,7 @@ pub fn spawn(
                         true
                     }
                     EngineCommand::Snapshot { depth, respond } => {
-                        let snapshot = book.snapshot(depth);
+                        let snapshot = engine.snapshot(depth);
                         let json: Arc<str> =
                             Arc::from(feed::Message::from_snapshot(&snapshot).encode());
                         if respond

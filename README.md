@@ -211,16 +211,24 @@ You do not need Docker or Node to develop and test the Rust matching engine.
 
 #### POSIX (Linux)
 ```bash
+# Run with reference OrderBook (default)
 cargo run -p server --bin server -- --port 8080 --feed-rate 1000 --seed 42
+
+# Or run with ultra-low latency FlatBook
+cargo run -p server --bin server -- --port 8080 --engine flat --feed-rate 1000 --seed 42
 ```
 
 #### PowerShell (Windows)
 ```powershell
+# Run with reference OrderBook (default)
 cargo run -p server --bin server -- --port 8080 --feed-rate 1000 --seed 42
+
+# Or run with ultra-low latency FlatBook
+cargo run -p server --bin server -- --port 8080 --engine flat --feed-rate 1000 --seed 42
 ```
 
 Endpoints available:
-* `GET  /health` — Liveness, live counters, sequence number, and channel depths.
+* `GET  /health` — Liveness, active engine variant (`reference` or `flat`), live counters, sequence number, and channel depths.
 * `GET  /ws` — WebSocket market data (bootstrap snapshot followed by contiguous deltas and trades).
 * `GET  /candles?from=<ms>&to=<ms>&interval=1s` — 1s OHLCV bars over `[from, to)` (`503` when running without database).
 * `GET  /feed-rate` · `POST /feed-rate {"orders_per_second": N}` — Live feed rate control (maximum 100,000).

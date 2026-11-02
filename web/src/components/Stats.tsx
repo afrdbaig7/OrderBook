@@ -9,13 +9,15 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "bi
   );
 }
 
-/** Header readouts: connection status, spread/midpoint/last price, and throughput. */
+/** Header readouts: connection status, engine variant, spread/midpoint/last price, and throughput. */
 export function Stats({
   state,
   status,
+  engine,
 }: {
   state: OrderBookState;
   status: ConnectionStatus;
+  engine?: string | null;
 }) {
   const { snapshot, messagesPerSecond, tradesPerSecond } = state;
   const lastTone = snapshot.lastPrice === null ? undefined : "bid";
@@ -23,6 +25,15 @@ export function Stats({
   return (
     <div className="stats">
       <span className={`pill ${status === "live" ? "live" : "dead"}`}>{status}</span>
+      {engine && (
+        <span
+          className="pill"
+          style={{ textTransform: "uppercase", fontSize: "0.75rem", letterSpacing: "0.05em" }}
+          title={`Active matching engine: ${engine}`}
+        >
+          {engine}
+        </span>
+      )}
       <Stat
         label="mid"
         value={snapshot.midpoint === null ? "–" : snapshot.midpoint.toFixed(1)}

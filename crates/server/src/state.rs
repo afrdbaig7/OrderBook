@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use sqlx::PgPool;
 
-use crate::engine_thread::{EngineCommand, ServerEvent};
+use crate::engine_thread::{EngineCommand, EngineType, ServerEvent};
 use crate::metrics::Metrics;
 
 /// Shared slot holding the DB pool once the persistence writer connects.
@@ -37,4 +37,6 @@ pub struct AppState {
     pub admin_token: Option<String>,
     /// If true, POST /feed-rate is publicly accessible without authentication.
     pub allow_public_feed_rate: bool,
+    /// Active engine implementation type.
+    pub engine_type: EngineType,
 }

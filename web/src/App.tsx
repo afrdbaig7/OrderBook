@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { CandleChart } from "./components/CandleChart";
 import { Ladder } from "./components/Ladder";
@@ -11,6 +11,18 @@ export default function App() {
   const [feedRate, setFeedRate] = useState(1000);
   const [savedRate, setSavedRate] = useState<number | null>(null);
   const [rateError, setRateError] = useState<string | null>(null);
+  const [engineType, setEngineType] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/health")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { engine?: string } | null) => {
+        if (data?.engine) {
+          setEngineType(data.engine);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const applyFeedRate = async () => {
     setRateError(null);
@@ -34,7 +46,7 @@ export default function App() {
     <>
       <header>
         <h1>Low-Latency Order Book</h1>
-        <Stats state={state} status={state.status} />
+        <Stats state={state} status={state.status} engine={engineType} />
         <label className="muted feed-control">
           feed (orders/s){" "}
           <input
