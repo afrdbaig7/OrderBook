@@ -68,6 +68,51 @@ fn cli_records_verifies_and_refuses_to_overwrite() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(String::from_utf8_lossy(&result.stdout).contains("9 commands, 20 events"));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("engine: reference"));
+
+    // Verify same recording against FlatBook engine
+    let flat_verify = cli(&[
+        "verify".as_ref(),
+        recording.as_os_str(),
+        "--engine".as_ref(),
+        "flat".as_ref(),
+    ]);
+    assert!(
+        flat_verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&flat_verify.stderr)
+    );
+    assert!(String::from_utf8_lossy(&flat_verify.stdout).contains("9 commands, 20 events"));
+    assert!(String::from_utf8_lossy(&flat_verify.stdout).contains("engine: flat"));
+
+    // Record directly with FlatBook engine and cross-verify with reference engine
+    let flat_recording = dir.0.join("flat_recording.jsonl");
+    let flat_record_args = [
+        "record".as_ref(),
+        "--commands".as_ref(),
+        commands.as_os_str(),
+        "--output".as_ref(),
+        flat_recording.as_os_str(),
+        "--engine".as_ref(),
+        "flat".as_ref(),
+    ];
+    let result = cli(&flat_record_args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cross_verify = cli(&[
+        "verify".as_ref(),
+        flat_recording.as_os_str(),
+        "--engine".as_ref(),
+        "reference".as_ref(),
+    ]);
+    assert!(
+        cross_verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cross_verify.stderr)
+    );
 }
 
 #[test]

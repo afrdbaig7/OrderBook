@@ -19,11 +19,20 @@ use crate::metrics::Metrics;
 
 /// Identifies the matching engine implementation.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum EngineType {
     /// Standard dynamic BTreeMap + VecDeque reference engine.
+    #[default]
     Reference,
     /// Ultra-low latency, zero-allocation preallocated arena + bitmap engine.
     Flat,

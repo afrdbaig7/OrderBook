@@ -324,3 +324,31 @@ fn complete_snapshot_includes_more_than_the_display_depth() {
     recorder.finish().unwrap();
     assert_eq!(verify(Cursor::new(bytes)).unwrap().snapshot.bids.len(), 30);
 }
+
+#[test]
+fn flat_engine_replay_parity_round_trip() {
+    let mut ref_bytes = Vec::new();
+    let ref_summary = replay::record(Cursor::new(COMMANDS), &mut ref_bytes).unwrap();
+
+    let mut flat_bytes = Vec::new();
+    let flat_config = replay::ReplayEngineConfig {
+        engine: replay::EngineType::Flat,
+        flat_base_price: 1,
+        flat_tick_count: 512,
+        flat_max_orders: 1024,
+    };
+    let flat_summary =
+        replay::record_with_config(Cursor::new(COMMANDS), &mut flat_bytes, flat_config).unwrap();
+
+    // Summaries and event byte-streams must match exactly
+    assert_eq!(ref_summary, flat_summary);
+    assert_eq!(ref_bytes, flat_bytes);
+
+    // Cross-verify: verify reference recording using FlatBook engine
+    let cross_flat = replay::verify_with_config(Cursor::new(&ref_bytes), flat_config).unwrap();
+    assert_eq!(cross_flat, ref_summary);
+
+    // Cross-verify: verify flat recording using Reference engine
+    let cross_ref = replay::verify(Cursor::new(&flat_bytes)).unwrap();
+    assert_eq!(cross_ref, flat_summary);
+}

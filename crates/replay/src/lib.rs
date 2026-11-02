@@ -7,13 +7,139 @@
 
 use std::io::{self, BufRead, Read, Write};
 
-use engine::{Event, Fill, Order, OrderBook, OrderId, Price, RejectReason, Side, Snapshot};
+use engine::{
+    Event, Fill, FlatBook, FlatBookConfig, Order, OrderBook, OrderId, Price, RejectReason, Side,
+    Snapshot,
+};
 use feed::Command;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const FORMAT_VERSION: u32 = 1;
 /// Bounds memory used while reading a single record, including its newline.
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Identifies the matching engine implementation for recording and replay verification.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    clap::ValueEnum,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineType {
+    /// Standard dynamic BTreeMap + VecDeque reference engine.
+    #[default]
+    Reference,
+    /// Ultra-low latency, zero-allocation preallocated arena + bitmap engine.
+    Flat,
+}
+
+impl EngineType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Flat => "flat",
+        }
+    }
+}
+
+impl std::fmt::Display for EngineType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Configuration options for replay matching engines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayEngineConfig {
+    pub engine: EngineType,
+    pub flat_base_price: u64,
+    pub flat_tick_count: usize,
+    pub flat_max_orders: usize,
+}
+
+impl Default for ReplayEngineConfig {
+    fn default() -> Self {
+        Self {
+            engine: EngineType::Reference,
+            flat_base_price: 1,
+            flat_tick_count: 4_096,
+            flat_max_orders: 16_384,
+        }
+    }
+}
+
+enum ReplayEngineKind {
+    Reference(OrderBook),
+    Flat(FlatBook),
+}
+
+struct ReplayEngine {
+    kind: ReplayEngineKind,
+    events_buf: Vec<Event>,
+}
+
+impl ReplayEngine {
+    fn new(config: ReplayEngineConfig) -> Result<Self, Error> {
+        match config.engine {
+            EngineType::Reference => Ok(Self {
+                kind: ReplayEngineKind::Reference(OrderBook::new()),
+                events_buf: Vec::new(),
+            }),
+            EngineType::Flat => {
+                let fb_config = FlatBookConfig {
+                    base_price: config.flat_base_price,
+                    tick_count: config.flat_tick_count,
+                    max_orders: config.flat_max_orders,
+                };
+                let book = FlatBook::new(fb_config)
+                    .map_err(|err| invalid(1, format!("FlatBook configuration error: {err:?}")))?;
+                let events_buf = Vec::with_capacity(book.worst_case_event_capacity());
+                Ok(Self {
+                    kind: ReplayEngineKind::Flat(book),
+                    events_buf,
+                })
+            }
+        }
+    }
+
+    fn apply(&mut self, command: &Command) -> Result<&[Event], Error> {
+        self.events_buf.clear();
+        match &mut self.kind {
+            ReplayEngineKind::Reference(book) => {
+                self.events_buf.extend(command.apply(book));
+                Ok(&self.events_buf)
+            }
+            ReplayEngineKind::Flat(flat) => {
+                let res = match command {
+                    Command::Limit(order) => {
+                        flat.submit_limit_into(order.clone(), &mut self.events_buf)
+                    }
+                    Command::Market { id, side, qty } => {
+                        flat.submit_market_into(*id, *side, *qty, &mut self.events_buf)
+                    }
+                    Command::Cancel(id) => flat.cancel_into(*id, &mut self.events_buf),
+                };
+                if let Err(err) = res {
+                    return Err(invalid(0, format!("FlatBook execution error: {err:?}")));
+                }
+                Ok(&self.events_buf)
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        match &self.kind {
+            ReplayEngineKind::Reference(book) => book.snapshot(0),
+            ReplayEngineKind::Flat(flat) => flat.snapshot(),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -199,14 +325,18 @@ pub struct Summary {
 /// Call `finish` to write the footer and flush the output; dropping is incomplete.
 pub struct Recorder<W: Write> {
     writer: W,
-    book: OrderBook,
+    engine: ReplayEngine,
     commands: u64,
     events: u64,
     poisoned: bool,
 }
 
 impl<W: Write> Recorder<W> {
-    pub fn new(mut writer: W) -> Result<Self, Error> {
+    pub fn new(writer: W) -> Result<Self, Error> {
+        Self::with_config(writer, ReplayEngineConfig::default())
+    }
+
+    pub fn with_config(mut writer: W, config: ReplayEngineConfig) -> Result<Self, Error> {
         write_record(
             &mut writer,
             &Record::Header {
@@ -217,7 +347,7 @@ impl<W: Write> Recorder<W> {
         )?;
         Ok(Self {
             writer,
-            book: OrderBook::new(),
+            engine: ReplayEngine::new(config)?,
             commands: 0,
             events: 0,
             poisoned: false,
@@ -228,7 +358,7 @@ impl<W: Write> Recorder<W> {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
-        let events = command.apply(&mut self.book);
+        let events = self.engine.apply(command)?;
         let index = self.commands + 1;
         let record = Record::Command {
             index,
@@ -241,7 +371,7 @@ impl<W: Write> Recorder<W> {
         }
         self.commands = index;
         self.events += events.len() as u64;
-        Ok(events)
+        Ok(events.to_vec())
     }
 
     pub fn finish(mut self) -> Result<Summary, Error> {
@@ -251,7 +381,7 @@ impl<W: Write> Recorder<W> {
         let summary = Summary {
             commands: self.commands,
             events: self.events,
-            snapshot: self.book.snapshot(0),
+            snapshot: self.engine.snapshot(),
         };
         write_record(
             &mut self.writer,
@@ -299,10 +429,18 @@ fn read_line<T: DeserializeOwned>(
         .map_err(|source| Error::Json { line, source })
 }
 
-/// Applies a JSONL command file and records its results. Any input error leaves
-/// output without a footer, so it cannot pass verification as a shorter run.
-pub fn record(mut commands: impl BufRead, output: impl Write) -> Result<Summary, Error> {
-    let mut recorder = Recorder::new(output)?;
+/// Applies a JSONL command file and records its results using the default reference engine.
+pub fn record(commands: impl BufRead, output: impl Write) -> Result<Summary, Error> {
+    record_with_config(commands, output, ReplayEngineConfig::default())
+}
+
+/// Applies a JSONL command file and records its results using the specified engine configuration.
+pub fn record_with_config(
+    mut commands: impl BufRead,
+    output: impl Write,
+    config: ReplayEngineConfig,
+) -> Result<Summary, Error> {
+    let mut recorder = Recorder::with_config(output, config)?;
     let mut line = 1;
     while let Some(command) = read_line::<RecordedCommand>(&mut commands, line)? {
         recorder.submit(&Command::from(command))?;
@@ -311,9 +449,18 @@ pub fn record(mut commands: impl BufRead, output: impl Write) -> Result<Summary,
     recorder.finish()
 }
 
-/// Replays every command against a fresh book, comparing complete events and
-/// the final snapshot. This checks deterministic behavior, not authenticity.
-pub fn verify(mut input: impl BufRead) -> Result<Summary, Error> {
+/// Replays every command against the default reference book, comparing complete events and
+/// the final snapshot.
+pub fn verify(input: impl BufRead) -> Result<Summary, Error> {
+    verify_with_config(input, ReplayEngineConfig::default())
+}
+
+/// Replays every command against the configured matching engine, comparing complete events and
+/// the final snapshot.
+pub fn verify_with_config(
+    mut input: impl BufRead,
+    config: ReplayEngineConfig,
+) -> Result<Summary, Error> {
     match read_line::<Record>(&mut input, 1)? {
         Some(Record::Header { version, .. }) if version == FORMAT_VERSION => {}
         Some(Record::Header { version, .. }) => {
@@ -321,7 +468,7 @@ pub fn verify(mut input: impl BufRead) -> Result<Summary, Error> {
         }
         _ => return Err(invalid(1, "expected recording header")),
     }
-    let mut book = OrderBook::new();
+    let mut engine = ReplayEngine::new(config)?;
     let mut commands = 0;
     let mut events = 0;
     let mut line = 2;
@@ -338,11 +485,8 @@ pub fn verify(mut input: impl BufRead) -> Result<Summary, Error> {
                         format!("expected command {}, found {index}", commands + 1),
                     ));
                 }
-                let actual: Vec<_> = Command::from(command)
-                    .apply(&mut book)
-                    .iter()
-                    .map(RecordedEvent::from)
-                    .collect();
+                let actual_events = engine.apply(&Command::from(command))?;
+                let actual: Vec<_> = actual_events.iter().map(RecordedEvent::from).collect();
                 if actual != expected {
                     let event = actual
                         .iter()
@@ -363,7 +507,7 @@ pub fn verify(mut input: impl BufRead) -> Result<Summary, Error> {
                 if commands != expected_commands || events != expected_events {
                     return Err(invalid(line, "footer totals do not match replay"));
                 }
-                if snapshot != book.snapshot(0) {
+                if snapshot != engine.snapshot() {
                     return Err(invalid(line, "final snapshot differs from replay"));
                 }
                 if read_line::<Record>(&mut input, line + 1)?.is_some() {

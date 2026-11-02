@@ -175,7 +175,11 @@ Measured over localhost loopback from server event timestamp (immediately post-m
 Run a recorded scenario without a server or database:
 
 ```bash
+# Verify against reference OrderBook (default)
 cargo run --locked -p replay -- verify docs/recordings/basic.recording.jsonl
+
+# Or verify against ultra-low latency FlatBook
+cargo run --locked -p replay -- verify docs/recordings/basic.recording.jsonl --engine flat
 ```
 
 The example covers FIFO partial fills, cancellation, unfilled market quantity,
@@ -187,6 +191,8 @@ To create a recording from your own JSON Lines command file:
 ```bash
 cargo run --locked -p replay -- record --commands docs/recordings/basic.commands.jsonl --output my-recording.jsonl
 cargo run --locked -p replay -- verify my-recording.jsonl
+# Cross-verify: recordings verify identically on both matching engines
+cargo run --locked -p replay -- verify my-recording.jsonl --engine flat
 ```
 
 Output files must be new; the recorder refuses to overwrite existing files.
