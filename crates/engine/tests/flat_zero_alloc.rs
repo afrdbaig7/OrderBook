@@ -127,6 +127,23 @@ fn test_zero_allocations_on_hot_path() {
     book.submit_market_into(OrderId(901), Side::Ask, 30, &mut events)
         .expect("market order");
 
+    // --- F. Order modify / amend operations ---
+    // Same price decrease (priority preserved)
+    book.modify_into(OrderId(900), 100, Price(BASE_PRICE + 310), &mut events)
+        .expect("modify decrease");
+
+    // Same price increase (priority lost)
+    book.modify_into(OrderId(900), 150, Price(BASE_PRICE + 310), &mut events)
+        .expect("modify increase");
+
+    // Price change non-crossing (cancel-replace resting)
+    book.modify_into(OrderId(900), 120, Price(BASE_PRICE + 305), &mut events)
+        .expect("modify price resting");
+
+    // Unknown order modify rejection
+    book.modify_into(OrderId(999_999), 50, Price(BASE_PRICE + 305), &mut events)
+        .expect("modify unknown order reject");
+
     // 3. Stop tracking allocations
     TRACKING.store(false, Ordering::SeqCst);
 

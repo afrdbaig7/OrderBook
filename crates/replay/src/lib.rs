@@ -124,6 +124,11 @@ impl ReplayEngine {
                         flat.submit_market_into(*id, *side, *qty, &mut self.events_buf)
                     }
                     Command::Cancel(id) => flat.cancel_into(*id, &mut self.events_buf),
+                    Command::Modify {
+                        id,
+                        new_qty,
+                        new_price,
+                    } => flat.modify_into(*id, *new_qty, *new_price, &mut self.events_buf),
                 };
                 if let Err(err) = res {
                     return Err(invalid(0, format!("FlatBook execution error: {err:?}")));
@@ -189,6 +194,11 @@ pub enum RecordedCommand {
     Cancel {
         id: OrderId,
     },
+    Modify {
+        id: OrderId,
+        new_qty: u64,
+        new_price: Price,
+    },
 }
 
 impl From<&Command> for RecordedCommand {
@@ -206,6 +216,15 @@ impl From<&Command> for RecordedCommand {
                 qty: *qty,
             },
             Command::Cancel(id) => Self::Cancel { id: *id },
+            Command::Modify {
+                id,
+                new_qty,
+                new_price,
+            } => Self::Modify {
+                id: *id,
+                new_qty: *new_qty,
+                new_price: *new_price,
+            },
         }
     }
 }
@@ -226,6 +245,15 @@ impl From<RecordedCommand> for Command {
             }),
             RecordedCommand::Market { id, side, qty } => Self::Market { id, side, qty },
             RecordedCommand::Cancel { id } => Self::Cancel(id),
+            RecordedCommand::Modify {
+                id,
+                new_qty,
+                new_price,
+            } => Self::Modify {
+                id,
+                new_qty,
+                new_price,
+            },
         }
     }
 }

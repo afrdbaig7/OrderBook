@@ -91,6 +91,8 @@ pub enum RejectReason {
     DuplicateOrderId,
     #[error("unknown cancel")]
     UnknownCancel,
+    #[error("unknown order")]
+    UnknownOrder,
     /// Market order's remainder dropped after liquidity ran out.
     #[error("market order unfilled")]
     MarketUnfilled,

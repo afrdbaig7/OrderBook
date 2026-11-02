@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use super::arena::SENTINEL;
-use crate::types::{Price, Side};
+use crate::types::{Price, RejectReason, Side};
 
 /// Aggregate state for a single price tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +184,70 @@ impl LevelSide {
         }
 
         new_total
+    }
+
+    /// Modifies the quantity of a resting order at `tick_idx`.
+    ///
+    /// - If `new_qty <= old_qty`: Queue priority is preserved (order stays in place).
+    /// - If `new_qty > old_qty`: Order loses priority and is moved to the back (tail) of the queue.
+    ///
+    /// Returns `Ok((new_level_total, priority_lost))` or `Err(RejectReason::LevelQuantityOverflow)`.
+    #[inline(always)]
+    pub fn modify_order_qty(
+        &mut self,
+        tick_idx: usize,
+        slot_idx: u32,
+        new_qty: u64,
+        arena: &mut super::arena::OrderArena,
+    ) -> Result<(u64, bool), RejectReason> {
+        let old_qty = arena.get(slot_idx).expect("valid slot").qty;
+
+        if new_qty == old_qty {
+            return Ok((self.levels[tick_idx].total_qty, false));
+        }
+
+        if new_qty < old_qty {
+            let diff = old_qty - new_qty;
+            self.levels[tick_idx].total_qty -= diff;
+            arena.get_mut(slot_idx).expect("valid slot").qty = new_qty;
+            return Ok((self.levels[tick_idx].total_qty, false));
+        }
+
+        let diff = new_qty - old_qty;
+        let new_total = match self.levels[tick_idx].total_qty.checked_add(diff) {
+            Some(t) if t <= crate::types::MAX_LEVEL_QTY => t,
+            _ => return Err(RejectReason::LevelQuantityOverflow),
+        };
+
+        self.levels[tick_idx].total_qty = new_total;
+        arena.get_mut(slot_idx).expect("valid slot").qty = new_qty;
+
+        let level = &mut self.levels[tick_idx];
+        if level.tail != slot_idx {
+            // Unlink from current position
+            let prev = arena.get(slot_idx).expect("slot").prev;
+            let next = arena.get(slot_idx).expect("slot").next;
+
+            if prev == SENTINEL {
+                level.head = next;
+            } else {
+                arena.get_mut(prev).expect("prev").next = next;
+            }
+
+            if next != SENTINEL {
+                arena.get_mut(next).expect("next").prev = prev;
+            }
+
+            // Append to tail
+            let old_tail = level.tail;
+            arena.get_mut(old_tail).expect("tail").next = slot_idx;
+            let curr = arena.get_mut(slot_idx).expect("slot");
+            curr.prev = old_tail;
+            curr.next = SENTINEL;
+            level.tail = slot_idx;
+        }
+
+        Ok((new_total, true))
     }
 
     #[inline]

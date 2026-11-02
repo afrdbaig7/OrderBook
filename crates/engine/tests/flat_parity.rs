@@ -676,3 +676,151 @@ fn test_maximum_supported_output_sweep() {
     assert_eq!(fb.best_ask(), None);
     assert_eq!(fb.best_bid(), Some(Price(BASE_PRICE + 150)));
 }
+
+#[test]
+fn test_parity_modify_quantity_decrease() {
+    let (mut ob, mut fb, mut buf) = make_books();
+
+    let o1 = Order {
+        id: OrderId(1),
+        side: Side::Bid,
+        price: Price(BASE_PRICE + 100),
+        qty: 50,
+    };
+    let o2 = Order {
+        id: OrderId(2),
+        side: Side::Bid,
+        price: Price(BASE_PRICE + 100),
+        qty: 50,
+    };
+
+    ob.submit_limit(o1.clone());
+    fb.submit_limit_into(o1, &mut buf).unwrap();
+
+    ob.submit_limit(o2.clone());
+    fb.submit_limit_into(o2, &mut buf).unwrap();
+
+    // Modify Order 1 decreasing qty from 50 to 30
+    let ob_ev = ob.modify(OrderId(1), 30, Price(BASE_PRICE + 100));
+    fb.modify_into(OrderId(1), 30, Price(BASE_PRICE + 100), &mut buf)
+        .unwrap();
+    assert_parity(&ob, &fb, &ob_ev, &buf, "modify qty decrease");
+
+    // Match against both: Order 1 must fill first because priority was preserved!
+    let ob_ev_m = ob.submit_market(OrderId(99), Side::Ask, 30);
+    fb.submit_market_into(OrderId(99), Side::Ask, 30, &mut buf)
+        .unwrap();
+    assert_parity(&ob, &fb, &ob_ev_m, &buf, "market fill after decrease");
+}
+
+#[test]
+fn test_parity_modify_quantity_increase_priority_loss() {
+    let (mut ob, mut fb, mut buf) = make_books();
+
+    let o1 = Order {
+        id: OrderId(1),
+        side: Side::Bid,
+        price: Price(BASE_PRICE + 100),
+        qty: 50,
+    };
+    let o2 = Order {
+        id: OrderId(2),
+        side: Side::Bid,
+        price: Price(BASE_PRICE + 100),
+        qty: 50,
+    };
+
+    ob.submit_limit(o1.clone());
+    fb.submit_limit_into(o1, &mut buf).unwrap();
+
+    ob.submit_limit(o2.clone());
+    fb.submit_limit_into(o2, &mut buf).unwrap();
+
+    // Modify Order 1 increasing qty from 50 to 70 -> priority lost, moves to tail
+    let ob_ev = ob.modify(OrderId(1), 70, Price(BASE_PRICE + 100));
+    fb.modify_into(OrderId(1), 70, Price(BASE_PRICE + 100), &mut buf)
+        .unwrap();
+    assert_parity(&ob, &fb, &ob_ev, &buf, "modify qty increase");
+
+    // Match against both: Order 2 must fill first because Order 1 lost priority!
+    let ob_ev_m = ob.submit_market(OrderId(99), Side::Ask, 50);
+    fb.submit_market_into(OrderId(99), Side::Ask, 50, &mut buf)
+        .unwrap();
+    assert_parity(
+        &ob,
+        &fb,
+        &ob_ev_m,
+        &buf,
+        "market fill after increase (Order 2 fills first)",
+    );
+}
+
+#[test]
+fn test_parity_modify_price_cancel_replace_resting() {
+    let (mut ob, mut fb, mut buf) = make_books();
+
+    let o1 = Order {
+        id: OrderId(1),
+        side: Side::Bid,
+        price: Price(BASE_PRICE + 100),
+        qty: 50,
+    };
+    ob.submit_limit(o1.clone());
+    fb.submit_limit_into(o1, &mut buf).unwrap();
+
+    // Amend to lower price (resting)
+    let ob_ev = ob.modify(OrderId(1), 40, Price(BASE_PRICE + 95));
+    fb.modify_into(OrderId(1), 40, Price(BASE_PRICE + 95), &mut buf)
+        .unwrap();
+    assert_parity(&ob, &fb, &ob_ev, &buf, "modify price non-crossing");
+}
+
+#[test]
+fn test_parity_modify_price_crossing_sweep() {
+    let (mut ob, mut fb, mut buf) = make_books();
+
+    // Ask resting at 105
+    let a1 = Order {
+        id: OrderId(10),
+        side: Side::Ask,
+        price: Price(BASE_PRICE + 105),
+        qty: 30,
+    };
+    ob.submit_limit(a1.clone());
+    fb.submit_limit_into(a1, &mut buf).unwrap();
+
+    // Bid resting at 100
+    let b1 = Order {
+        id: OrderId(1),
+        side: Side::Bid,
+        price: Price(BASE_PRICE + 100),
+        qty: 50,
+    };
+    ob.submit_limit(b1.clone());
+    fb.submit_limit_into(b1, &mut buf).unwrap();
+
+    // Amend Bid 1 to 105 (crosses ask) with qty 45
+    let ob_ev = ob.modify(OrderId(1), 45, Price(BASE_PRICE + 105));
+    fb.modify_into(OrderId(1), 45, Price(BASE_PRICE + 105), &mut buf)
+        .unwrap();
+    assert_parity(&ob, &fb, &ob_ev, &buf, "modify price crossing sweep");
+}
+
+#[test]
+fn test_parity_modify_unknown_order_rejection() {
+    let (mut ob, mut fb, mut buf) = make_books();
+
+    let o1 = Order {
+        id: OrderId(1),
+        side: Side::Bid,
+        price: Price(BASE_PRICE + 100),
+        qty: 50,
+    };
+    ob.submit_limit(o1.clone());
+    fb.submit_limit_into(o1, &mut buf).unwrap();
+
+    let ob_ev = ob.modify(OrderId(999), 30, Price(BASE_PRICE + 100));
+    fb.modify_into(OrderId(999), 30, Price(BASE_PRICE + 100), &mut buf)
+        .unwrap();
+    assert_parity(&ob, &fb, &ob_ev, &buf, "modify unknown order");
+}

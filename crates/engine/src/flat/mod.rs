@@ -506,6 +506,237 @@ impl FlatBook {
         Ok(())
     }
 
+    /// Modifies a resting order's quantity and/or price into caller-owned `events` buffer.
+    ///
+    /// - If `new_price == old_price` and `new_qty <= old_qty`:
+    ///   Queue priority is preserved. Emits `Ack` then `Delta`.
+    /// - If `new_price == old_price` and `new_qty > old_qty`:
+    ///   Queue priority is lost (moves to end of level queue). Emits `Ack` then `Delta`.
+    /// - If `new_price != old_price`:
+    ///   Cancel-replace: unlinks from old level (emits `Ack` then old level `Delta`),
+    ///   then executes crossed fills (if any) and rests remainder at `new_price` (emits new level `Delta`).
+    /// - If `id` does not exist: emits `Reject(UnknownOrder)`.
+    pub fn modify_into(
+        &mut self,
+        id: OrderId,
+        new_qty: u64,
+        new_price: Price,
+        events: &mut Vec<Event>,
+    ) -> Result<(), FlatError> {
+        self.ensure_event_capacity(events)?;
+        events.clear();
+
+        if id.0 > MAX_ORDER_ID {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::OrderIdOutOfRange,
+            });
+            return Ok(());
+        }
+        if new_qty == 0 {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::ZeroQuantity,
+            });
+            return Ok(());
+        }
+        if new_qty > MAX_ORDER_QTY {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::QuantityOutOfRange,
+            });
+            return Ok(());
+        }
+        if new_price.0 == 0 {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::ZeroPrice,
+            });
+            return Ok(());
+        }
+        if new_price.0 > MAX_PRICE {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::PriceOutOfRange,
+            });
+            return Ok(());
+        }
+
+        let new_tick_idx = match self.ladder.price_to_tick(new_price) {
+            Some(idx) => idx,
+            None => {
+                return Err(FlatError::PriceOutOfWindow {
+                    price: new_price,
+                    base_price: self.config.base_price,
+                    max_price: self.config.base_price + self.config.tick_count as u64,
+                });
+            }
+        };
+
+        let slot_idx = match self.id_index.get(id) {
+            Some(idx) => idx,
+            None => {
+                events.push(Event::Reject {
+                    seq: self.take_seq(),
+                    id,
+                    reason: RejectReason::UnknownOrder,
+                });
+                return Ok(());
+            }
+        };
+
+        let slot = *self.arena.get(slot_idx).expect("valid slot");
+        let old_tick_idx = slot.price_tick as usize;
+        let old_price = self.ladder.tick_to_price(old_tick_idx);
+        let side = slot.side;
+        let old_qty = slot.qty;
+
+        if new_price == old_price {
+            if new_qty > old_qty {
+                let diff = new_qty - old_qty;
+                let current_total = self
+                    .ladder
+                    .side(side)
+                    .get_level(old_tick_idx)
+                    .map_or(0, |l| l.total_qty);
+                if current_total
+                    .checked_add(diff)
+                    .is_none_or(|q| q > MAX_LEVEL_QTY)
+                {
+                    events.push(Event::Reject {
+                        seq: self.take_seq(),
+                        id,
+                        reason: RejectReason::LevelQuantityOverflow,
+                    });
+                    return Ok(());
+                }
+            }
+
+            events.push(Event::Ack {
+                seq: self.take_seq(),
+                id,
+            });
+
+            let (new_total, _) = self
+                .ladder
+                .side_mut(side)
+                .modify_order_qty(old_tick_idx, slot_idx, new_qty, &mut self.arena)
+                .expect("overflow checked above");
+
+            events.push(Event::Delta {
+                seq: self.take_seq(),
+                side,
+                price: old_price,
+                new_total_qty: new_total,
+            });
+
+            return Ok(());
+        }
+
+        // new_price != old_price
+        let old_level_total =
+            self.ladder
+                .side_mut(side)
+                .remove_order(old_tick_idx, slot_idx, &mut self.arena);
+        self.arena.free(slot_idx);
+        self.id_index.remove(id);
+
+        events.push(Event::Ack {
+            seq: self.take_seq(),
+            id,
+        });
+
+        events.push(Event::Delta {
+            seq: self.take_seq(),
+            side,
+            price: old_price,
+            new_total_qty: old_level_total,
+        });
+
+        let maker_side = side.opposite();
+        let mut remaining = new_qty;
+
+        while remaining > 0 {
+            let best_tick = self.ladder.best_tick(maker_side);
+            let Some(maker_tick) = best_tick else {
+                break;
+            };
+
+            let maker_price = self.ladder.tick_to_price(maker_tick);
+            let crosses_level = match side {
+                Side::Bid => new_price >= maker_price,
+                Side::Ask => new_price <= maker_price,
+            };
+
+            if !crosses_level {
+                break;
+            }
+
+            let consumed = Self::consume_level(
+                &mut self.ladder,
+                &mut self.arena,
+                &mut self.id_index,
+                &mut self.next_seq,
+                maker_side,
+                maker_tick,
+                id,
+                remaining,
+                events,
+            );
+            remaining -= consumed;
+        }
+
+        if remaining > 0 {
+            let current_total = self
+                .ladder
+                .side(side)
+                .get_level(new_tick_idx)
+                .map_or(0, |l| l.total_qty);
+
+            if current_total
+                .checked_add(remaining)
+                .is_none_or(|q| q > MAX_LEVEL_QTY)
+            {
+                events.push(Event::Reject {
+                    seq: self.take_seq(),
+                    id,
+                    reason: RejectReason::LevelQuantityOverflow,
+                });
+                return Ok(());
+            }
+
+            let new_slot_idx = self
+                .arena
+                .allocate(id, side, new_tick_idx as u32, remaining)
+                .expect("arena has free capacity since old slot was freed");
+
+            let new_total = self.ladder.side_mut(side).enqueue_order(
+                new_tick_idx,
+                new_slot_idx,
+                remaining,
+                &mut self.arena,
+            );
+
+            self.id_index
+                .insert(id, new_slot_idx)
+                .expect("id index capacity");
+
+            events.push(Event::Delta {
+                seq: self.take_seq(),
+                side,
+                price: new_price,
+                new_total_qty: new_total,
+            });
+        }
+
+        Ok(())
+    }
+
     /// Returns the probe distance (number of buckets probed) for looking up `id` in the index.
     #[inline]
     pub fn index_probe_distance(&self, id: OrderId) -> usize {

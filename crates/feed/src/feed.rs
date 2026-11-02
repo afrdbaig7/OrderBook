@@ -12,8 +12,17 @@ use rand_chacha::ChaCha8Rng;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Limit(Order),
-    Market { id: OrderId, side: Side, qty: u64 },
+    Market {
+        id: OrderId,
+        side: Side,
+        qty: u64,
+    },
     Cancel(OrderId),
+    Modify {
+        id: OrderId,
+        new_qty: u64,
+        new_price: Price,
+    },
 }
 
 impl Command {
@@ -23,6 +32,11 @@ impl Command {
             Command::Limit(order) => book.submit_limit(order.clone()),
             Command::Market { id, side, qty } => book.submit_market(*id, *side, *qty),
             Command::Cancel(id) => book.cancel(*id),
+            Command::Modify {
+                id,
+                new_qty,
+                new_price,
+            } => book.modify(*id, *new_qty, *new_price),
         }
     }
 }

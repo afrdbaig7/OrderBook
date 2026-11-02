@@ -524,3 +524,218 @@ fn book_never_crossed_after_aggressive_orders() {
         assert!(b < a);
     }
 }
+
+#[test]
+fn modify_decrease_quantity_preserves_fifo_priority() {
+    let mut book = OrderBook::new();
+    book.submit_limit(bid(1, 100, 50));
+    book.submit_limit(bid(2, 100, 50));
+
+    let before = book.seq();
+    let evs = book.modify(OrderId(1), 30, Price(100));
+    assert_contiguous(&evs, before);
+    assert_eq!(
+        evs,
+        vec![
+            Event::Ack {
+                seq: before + 1,
+                id: OrderId(1),
+            },
+            Event::Delta {
+                seq: before + 2,
+                side: Side::Bid,
+                price: Price(100),
+                new_total_qty: 80,
+            },
+        ]
+    );
+
+    // Incoming ask should fill Order 1 first (preserving FIFO priority)
+    let fill_evs = book.submit_market(OrderId(99), Side::Ask, 30);
+    let fills = fills(&fill_evs);
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].maker_id, OrderId(1));
+    assert_eq!(fills[0].qty, 30);
+
+    // Order 2 still resting for 50
+    assert_eq!(book.total_resting_qty(), 50);
+    assert_eq!(book.order(OrderId(2)).unwrap().qty, 50);
+}
+
+#[test]
+fn modify_increase_quantity_loses_fifo_priority() {
+    let mut book = OrderBook::new();
+    book.submit_limit(bid(1, 100, 50));
+    book.submit_limit(bid(2, 100, 50));
+
+    let before = book.seq();
+    let evs = book.modify(OrderId(1), 70, Price(100));
+    assert_contiguous(&evs, before);
+    assert_eq!(
+        evs,
+        vec![
+            Event::Ack {
+                seq: before + 1,
+                id: OrderId(1),
+            },
+            Event::Delta {
+                seq: before + 2,
+                side: Side::Bid,
+                price: Price(100),
+                new_total_qty: 120,
+            },
+        ]
+    );
+
+    // Incoming ask should now fill Order 2 FIRST because Order 1 lost priority!
+    let fill_evs = book.submit_market(OrderId(99), Side::Ask, 50);
+    let fills = fills(&fill_evs);
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].maker_id, OrderId(2));
+    assert_eq!(fills[0].qty, 50);
+
+    // Order 1 is now resting with 70
+    assert_eq!(book.total_resting_qty(), 70);
+    assert_eq!(book.order(OrderId(1)).unwrap().qty, 70);
+}
+
+#[test]
+fn modify_price_non_crossing_cancel_replace() {
+    let mut book = OrderBook::new();
+    book.submit_limit(bid(1, 100, 50));
+
+    let before = book.seq();
+    let evs = book.modify(OrderId(1), 40, Price(98));
+    assert_contiguous(&evs, before);
+    assert_eq!(
+        evs,
+        vec![
+            Event::Ack {
+                seq: before + 1,
+                id: OrderId(1),
+            },
+            Event::Delta {
+                seq: before + 2,
+                side: Side::Bid,
+                price: Price(100),
+                new_total_qty: 0,
+            },
+            Event::Delta {
+                seq: before + 3,
+                side: Side::Bid,
+                price: Price(98),
+                new_total_qty: 40,
+            },
+        ]
+    );
+    assert_eq!(book.best_bid(), Some(Price(98)));
+    assert_eq!(book.total_resting_qty(), 40);
+}
+
+#[test]
+fn modify_price_crossing_executes_fills_and_rests_remainder() {
+    let mut book = OrderBook::new();
+    book.submit_limit(ask(10, 105, 30));
+    book.submit_limit(bid(1, 100, 50));
+
+    // Amend Bid 1 to price 105 (crosses ask 10) with qty 45
+    let before = book.seq();
+    let evs = book.modify(OrderId(1), 45, Price(105));
+    assert_contiguous(&evs, before);
+
+    // Should: Ack, Delta(100 -> 0), Fill(maker 10, taker 1 @ 105, qty 30), Delta(105 ask -> 0), Delta(105 bid -> 15)
+    assert_eq!(
+        evs[0],
+        Event::Ack {
+            seq: before + 1,
+            id: OrderId(1)
+        }
+    );
+    assert_eq!(
+        evs[1],
+        Event::Delta {
+            seq: before + 2,
+            side: Side::Bid,
+            price: Price(100),
+            new_total_qty: 0
+        }
+    );
+    assert_eq!(
+        evs[2],
+        Event::Fill {
+            seq: before + 3,
+            fill: Fill {
+                maker_id: OrderId(10),
+                taker_id: OrderId(1),
+                price: Price(105),
+                qty: 30,
+            },
+            taker_side: Side::Bid,
+        }
+    );
+    assert_eq!(
+        evs[3],
+        Event::Delta {
+            seq: before + 4,
+            side: Side::Ask,
+            price: Price(105),
+            new_total_qty: 0
+        }
+    );
+    assert_eq!(
+        evs[4],
+        Event::Delta {
+            seq: before + 5,
+            side: Side::Bid,
+            price: Price(105),
+            new_total_qty: 15
+        }
+    );
+
+    assert_eq!(book.best_bid(), Some(Price(105)));
+    assert_eq!(book.total_resting_qty(), 15);
+    assert_eq!(book.order(OrderId(1)).unwrap().qty, 15);
+}
+
+#[test]
+fn modify_unknown_order_rejected() {
+    let mut book = OrderBook::new();
+    book.submit_limit(bid(1, 100, 50));
+
+    let before = book.seq();
+    let evs = book.modify(OrderId(999), 30, Price(100));
+    assert_contiguous(&evs, before);
+    assert_eq!(
+        evs,
+        vec![Event::Reject {
+            seq: before + 1,
+            id: OrderId(999),
+            reason: RejectReason::UnknownOrder,
+        }]
+    );
+    assert_eq!(book.total_resting_qty(), 50);
+}
+
+#[test]
+fn modify_invalid_parameters_rejected() {
+    let mut book = OrderBook::new();
+    book.submit_limit(bid(1, 100, 50));
+
+    let evs_zero_qty = book.modify(OrderId(1), 0, Price(100));
+    assert_eq!(
+        reject_reasons(&evs_zero_qty),
+        vec![RejectReason::ZeroQuantity]
+    );
+
+    let evs_zero_price = book.modify(OrderId(1), 50, Price(0));
+    assert_eq!(
+        reject_reasons(&evs_zero_price),
+        vec![RejectReason::ZeroPrice]
+    );
+
+    let evs_overflow_qty = book.modify(OrderId(1), engine::MAX_ORDER_QTY + 1, Price(100));
+    assert_eq!(
+        reject_reasons(&evs_overflow_qty),
+        vec![RejectReason::QuantityOutOfRange]
+    );
+}

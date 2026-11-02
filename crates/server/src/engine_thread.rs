@@ -173,6 +173,16 @@ pub fn spawn(
                                         flat.submit_market_into(*id, *side, *qty, &mut flat_events)
                                     }
                                     Command::Cancel(id) => flat.cancel_into(*id, &mut flat_events),
+                                    Command::Modify {
+                                        id,
+                                        new_qty,
+                                        new_price,
+                                    } => flat.modify_into(
+                                        *id,
+                                        *new_qty,
+                                        *new_price,
+                                        &mut flat_events,
+                                    ),
                                 };
                                 if let Err(err) = res {
                                     warn!("FlatBook command error: {err:?}");

@@ -34,8 +34,9 @@ cargo run -p engine --example basic_matching
 This demonstrates:
 1. Submitting resting limit orders (bids and asks).
 2. Submitting an aggressive crossing limit order (triggering maker-price execution and resting remainder).
-3. Cancelling an open resting order.
-4. Capturing a complete point-in-time L2 snapshot with monotonically assigned sequence numbers.
+3. Amending or cancel-replacing resting orders (`modify`) with FIFO queue priority preservation.
+4. Cancelling an open resting order.
+5. Capturing a complete point-in-time L2 snapshot with monotonically assigned sequence numbers.
 
 ---
 
@@ -86,7 +87,7 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 
 * **Integer Prices & Quantities**: All prices and quantities in the matching engine are integers (`u64`/`i64`); floating-point math is forbidden in the book.
 * **Maker-Price Execution**: Fills always execute at the resting maker order's price.
-* **FIFO Priority**: Orders at the same price level execute in first-in, first-out order.
+* **FIFO Priority & Queue Preservation on Amend**: Orders at the same price level execute in first-in, first-out order. Order amendments (`modify`) that preserve or reduce size retain their queue priority without moving; size increases lose priority and move to the tail of the level queue.
 * **Complete Bootstrap Snapshots**: Bootstrap snapshots return all resting levels up to `MAX_BOOK_LEVELS_PER_SIDE = 10,000`. Visual depth truncation is managed strictly on the client.
 * **Sequencing**: The engine assigns every sequence number (`seq`). Every event—including fills, cancellations, and rejections—consumes exactly one sequence number.
 * **Quantity Conservation**: Checked with property tests (`proptest`):

@@ -23,6 +23,14 @@ impl MatchResult {
     }
 }
 
+/// Result of modifying an order's quantity in a price level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelModifyResult {
+    pub old_qty: u64,
+    pub new_level_total: u64,
+    pub priority_lost: bool,
+}
+
 /// FIFO queue of orders resting at one price.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PriceLevel {
@@ -110,6 +118,64 @@ impl PriceLevel {
         let removed = self.orders.remove(pos)?;
         self.total_qty -= removed.qty;
         Some(removed)
+    }
+
+    /// Modifies the quantity of an order in this level.
+    ///
+    /// - If `new_qty <= old_qty`: Queue priority is preserved (order stays in place).
+    /// - If `new_qty > old_qty`: Order loses priority and is moved to the back of the queue.
+    ///
+    /// Returns `Ok(Some(LevelModifyResult))` if found,
+    /// `Ok(None)` if `id` is not present in this level,
+    /// or `Err(...)` if the new aggregate level quantity would overflow `MAX_LEVEL_QTY`.
+    pub fn modify_qty(
+        &mut self,
+        id: OrderId,
+        new_qty: u64,
+    ) -> Result<Option<LevelModifyResult>, &'static str> {
+        let Some(pos) = self.orders.iter().position(|o| o.id == id) else {
+            return Ok(None);
+        };
+
+        let old_qty = self.orders[pos].qty;
+        if new_qty == old_qty {
+            return Ok(Some(LevelModifyResult {
+                old_qty,
+                new_level_total: self.total_qty,
+                priority_lost: false,
+            }));
+        }
+
+        if new_qty < old_qty {
+            let diff = old_qty - new_qty;
+            self.total_qty -= diff;
+            self.orders[pos].qty = new_qty;
+            return Ok(Some(LevelModifyResult {
+                old_qty,
+                new_level_total: self.total_qty,
+                priority_lost: false,
+            }));
+        }
+
+        let diff = new_qty - old_qty;
+        let new_total = self
+            .total_qty
+            .checked_add(diff)
+            .ok_or("arithmetic overflow in price level quantity")?;
+        if new_total > crate::types::MAX_LEVEL_QTY {
+            return Err("aggregate price level quantity exceeds maximum safe limit");
+        }
+        self.total_qty = new_total;
+
+        let mut order = self.orders.remove(pos).expect("position exists");
+        order.qty = new_qty;
+        self.orders.push_back(order);
+
+        Ok(Some(LevelModifyResult {
+            old_qty,
+            new_level_total: self.total_qty,
+            priority_lost: true,
+        }))
     }
 
     #[inline]

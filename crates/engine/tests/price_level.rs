@@ -266,3 +266,102 @@ fn total_qty_matches_sum_of_orders_through_mixed_ops() {
     assert_consistent(&level);
     assert!(level.is_empty());
 }
+
+#[test]
+fn modify_qty_decrease_preserves_queue_priority() {
+    let mut level = PriceLevel::new();
+    level.insert(order(1, 50));
+    level.insert(order(2, 50));
+
+    let res = level
+        .modify_qty(OrderId(1), 30)
+        .expect("within bounds")
+        .expect("order exists");
+    assert_eq!(res.old_qty, 50);
+    assert_eq!(res.new_level_total, 80);
+    assert!(!res.priority_lost);
+
+    // Order 1 must still be at the front with qty 30
+    let front = level.front().unwrap();
+    assert_eq!(front.id, OrderId(1));
+    assert_eq!(front.qty, 30);
+    assert_eq!(level.total_qty(), 80);
+
+    // Matching against level consumes Order 1 first
+    let fills = level.match_order(OrderId(99), 30);
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].maker_id, OrderId(1));
+    assert_eq!(fills[0].qty, 30);
+    assert_eq!(level.front().unwrap().id, OrderId(2));
+}
+
+#[test]
+fn modify_qty_increase_loses_queue_priority_and_moves_to_back() {
+    let mut level = PriceLevel::new();
+    level.insert(order(1, 50));
+    level.insert(order(2, 50));
+
+    let res = level
+        .modify_qty(OrderId(1), 70)
+        .expect("within bounds")
+        .expect("order exists");
+    assert_eq!(res.old_qty, 50);
+    assert_eq!(res.new_level_total, 120);
+    assert!(res.priority_lost);
+
+    // Order 2 must now be front because Order 1 was moved to the tail
+    let front = level.front().unwrap();
+    assert_eq!(front.id, OrderId(2));
+    assert_eq!(front.qty, 50);
+    assert_eq!(level.total_qty(), 120);
+
+    let queue_ids: Vec<u64> = level.iter().map(|o| o.id.0).collect();
+    assert_eq!(queue_ids, vec![2, 1]);
+
+    // Matching against level consumes Order 2 first
+    let fills = level.match_order(OrderId(99), 50);
+    assert_eq!(fills.len(), 1);
+    assert_eq!(fills[0].maker_id, OrderId(2));
+    assert_eq!(fills[0].qty, 50);
+
+    // Order 1 is now remaining with 70
+    assert_eq!(level.front().unwrap().id, OrderId(1));
+    assert_eq!(level.front().unwrap().qty, 70);
+}
+
+#[test]
+fn modify_qty_same_preserves_position() {
+    let mut level = PriceLevel::new();
+    level.insert(order(1, 50));
+    level.insert(order(2, 50));
+
+    let res = level
+        .modify_qty(OrderId(1), 50)
+        .expect("within bounds")
+        .expect("order exists");
+    assert_eq!(res.old_qty, 50);
+    assert_eq!(res.new_level_total, 100);
+    assert!(!res.priority_lost);
+    assert_eq!(level.front().unwrap().id, OrderId(1));
+}
+
+#[test]
+fn modify_qty_unknown_order_returns_none() {
+    let mut level = PriceLevel::new();
+    level.insert(order(1, 50));
+
+    let res = level.modify_qty(OrderId(999), 40).expect("valid");
+    assert!(res.is_none());
+    assert_eq!(level.total_qty(), 50);
+}
+
+#[test]
+fn modify_qty_overflow_returns_err() {
+    let mut level = PriceLevel::new();
+    level.insert(order(1, 10));
+
+    let res = level.modify_qty(OrderId(1), engine::MAX_LEVEL_QTY + 1);
+    assert!(res.is_err());
+    assert_eq!(level.total_qty(), 10);
+    assert_eq!(level.front().unwrap().qty, 10);
+}

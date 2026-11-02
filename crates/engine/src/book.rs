@@ -387,6 +387,228 @@ impl OrderBook {
         ]
     }
 
+    /// Modifies a resting order's quantity and/or price.
+    ///
+    /// - If `new_price == old_price` and `new_qty <= old_qty`:
+    ///   Queue priority is preserved. Emits `Ack` then `Delta`.
+    /// - If `new_price == old_price` and `new_qty > old_qty`:
+    ///   Queue priority is lost (moves to end of level queue). Emits `Ack` then `Delta`.
+    /// - If `new_price != old_price`:
+    ///   Cancel-replace: unlinks from old level (emits `Ack` then old level `Delta`),
+    ///   then executes crossed fills (if any) and rests remainder at `new_price` (emits new level `Delta`).
+    /// - If `id` does not exist: emits `Reject(UnknownOrder)`.
+    pub fn modify(&mut self, id: OrderId, new_qty: u64, new_price: Price) -> Vec<Event> {
+        let mut events = Vec::new();
+
+        if id.0 > MAX_ORDER_ID {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::OrderIdOutOfRange,
+            });
+            return events;
+        }
+        if new_qty == 0 {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::ZeroQuantity,
+            });
+            return events;
+        }
+        if new_qty > MAX_ORDER_QTY {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::QuantityOutOfRange,
+            });
+            return events;
+        }
+        if new_price.0 == 0 {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::ZeroPrice,
+            });
+            return events;
+        }
+        if new_price.0 > MAX_PRICE {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::PriceOutOfRange,
+            });
+            return events;
+        }
+
+        let Some(&(side, old_price)) = self.index.get(&id) else {
+            events.push(Event::Reject {
+                seq: self.take_seq(),
+                id,
+                reason: RejectReason::UnknownOrder,
+            });
+            return events;
+        };
+
+        if new_price == old_price {
+            let modify_result = {
+                let levels = match side {
+                    Side::Bid => &mut self.bids,
+                    Side::Ask => &mut self.asks,
+                };
+                let level = levels
+                    .get_mut(&old_price)
+                    .expect("indexed order must have a level");
+
+                let old_qty = level
+                    .iter()
+                    .find(|o| o.id == id)
+                    .expect("indexed order must exist in level")
+                    .qty;
+
+                if new_qty > old_qty {
+                    let diff = new_qty - old_qty;
+                    if level
+                        .total_qty()
+                        .checked_add(diff)
+                        .is_none_or(|q| q > crate::types::MAX_LEVEL_QTY)
+                    {
+                        Err(RejectReason::LevelQuantityOverflow)
+                    } else {
+                        Ok(level.modify_qty(id, new_qty).expect("checked above"))
+                    }
+                } else {
+                    Ok(level.modify_qty(id, new_qty).expect("checked above"))
+                }
+            };
+
+            match modify_result {
+                Err(reason) => {
+                    events.push(Event::Reject {
+                        seq: self.take_seq(),
+                        id,
+                        reason,
+                    });
+                    return events;
+                }
+                Ok(res) => {
+                    let new_total = res.expect("order must exist").new_level_total;
+                    events.push(Event::Ack {
+                        seq: self.take_seq(),
+                        id,
+                    });
+                    events.push(Event::Delta {
+                        seq: self.take_seq(),
+                        side,
+                        price: old_price,
+                        new_total_qty: new_total,
+                    });
+                    return events;
+                }
+            }
+        }
+
+        // new_price != old_price
+        let (old_level_total, level_empty) = {
+            let levels = match side {
+                Side::Bid => &mut self.bids,
+                Side::Ask => &mut self.asks,
+            };
+            let level = levels
+                .get_mut(&old_price)
+                .expect("indexed order must have a level");
+            level.remove(id).expect("indexed order must exist in level");
+            (level.total_qty(), level.is_empty())
+        };
+
+        if level_empty {
+            match side {
+                Side::Bid => self.bids.remove(&old_price),
+                Side::Ask => self.asks.remove(&old_price),
+            };
+        }
+        self.index.remove(&id);
+
+        events.push(Event::Ack {
+            seq: self.take_seq(),
+            id,
+        });
+
+        events.push(Event::Delta {
+            seq: self.take_seq(),
+            side,
+            price: old_price,
+            new_total_qty: old_level_total,
+        });
+
+        let maker_side = side.opposite();
+        let mut remaining = new_qty;
+
+        while remaining > 0 {
+            let Some(best) = self.best_price(maker_side) else {
+                break;
+            };
+            let crosses = match side {
+                Side::Bid => new_price >= best,
+                Side::Ask => new_price <= best,
+            };
+            if !crosses {
+                break;
+            }
+
+            let Some(fills) = self.consume_level(maker_side, best, id, remaining, &mut events)
+            else {
+                break;
+            };
+            remaining -= fills;
+        }
+
+        if remaining > 0 {
+            let levels = match side {
+                Side::Bid => &mut self.bids,
+                Side::Ask => &mut self.asks,
+            };
+            if !levels.contains_key(&new_price) && levels.len() >= MAX_BOOK_LEVELS_PER_SIDE {
+                events.push(Event::Reject {
+                    seq: self.take_seq(),
+                    id,
+                    reason: RejectReason::BookDepthExceeded,
+                });
+                return events;
+            }
+            let level = levels.entry(new_price).or_default();
+            if level
+                .try_insert(Order {
+                    id,
+                    side,
+                    price: new_price,
+                    qty: remaining,
+                })
+                .is_err()
+            {
+                if level.is_empty() {
+                    levels.remove(&new_price);
+                }
+                events.push(Event::Reject {
+                    seq: self.take_seq(),
+                    id,
+                    reason: RejectReason::LevelQuantityOverflow,
+                });
+                return events;
+            }
+            let new_total = level.total_qty();
+            self.index.insert(id, (side, new_price));
+            events.push(Event::Delta {
+                seq: self.take_seq(),
+                side,
+                price: new_price,
+                new_total_qty: new_total,
+            });
+        }
+
+        events
+    }
+
     /// Validation for newly submitted orders (cancel has its own path).
     fn reject_new_order(&self, id: OrderId, price: Price, qty: u64) -> Option<RejectReason> {
         if id.0 > MAX_ORDER_ID {

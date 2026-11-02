@@ -352,3 +352,52 @@ fn flat_engine_replay_parity_round_trip() {
     let cross_ref = replay::verify(Cursor::new(&flat_bytes)).unwrap();
     assert_eq!(cross_ref, flat_summary);
 }
+
+#[test]
+fn modify_command_round_trip_and_replay() {
+    let mut bytes = Vec::new();
+    let mut recorder = Recorder::new(&mut bytes).unwrap();
+
+    recorder
+        .submit(&Command::Limit(Order {
+            id: OrderId(1),
+            side: Side::Bid,
+            price: Price(100),
+            qty: 50,
+        }))
+        .unwrap();
+
+    recorder
+        .submit(&Command::Modify {
+            id: OrderId(1),
+            new_qty: 30,
+            new_price: Price(100),
+        })
+        .unwrap();
+
+    recorder
+        .submit(&Command::Modify {
+            id: OrderId(1),
+            new_qty: 25,
+            new_price: Price(98),
+        })
+        .unwrap();
+
+    let summary = recorder.finish().unwrap();
+    assert_eq!(summary.commands, 3);
+    assert_eq!(summary.snapshot.bids, vec![(Price(98), 25)]);
+
+    // Replay verify with reference engine
+    let replayed = replay::verify(Cursor::new(&bytes)).unwrap();
+    assert_eq!(replayed, summary);
+
+    // Replay verify with flat engine
+    let flat_config = replay::ReplayEngineConfig {
+        engine: replay::EngineType::Flat,
+        flat_base_price: 1,
+        flat_tick_count: 512,
+        flat_max_orders: 1024,
+    };
+    let replayed_flat = replay::verify_with_config(Cursor::new(&bytes), flat_config).unwrap();
+    assert_eq!(replayed_flat, summary);
+}

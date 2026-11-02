@@ -103,11 +103,15 @@ fn main() {
         book.best_ask()
     );
 
-    println!("\n3. Cancelling resting bid order (OrderId 1)...");
+    println!("\n3. Amending resting order (OrderId 4) reducing qty from 10 to 5 (FIFO priority preserved)...");
+    let modify_events = book.modify(OrderId(4), 5, Price(106));
+    print_events("Order Amend Result", &modify_events);
+
+    println!("\n4. Cancelling resting bid order (OrderId 1)...");
     let cancel_events = book.cancel(OrderId(1));
     print_events("Cancellation Result", &cancel_events);
 
-    println!("\n4. Capturing complete L2 snapshot...");
+    println!("\n5. Capturing complete L2 snapshot...");
     let snapshot = book.snapshot(0); // 0 = complete depth within enforced limits
     println!("Snapshot at monotonic sequence {}:", snapshot.seq);
     println!("  Bids (price, qty): {:?}", snapshot.bids);
