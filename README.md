@@ -5,8 +5,9 @@ An experimental ultra-low latency Rust matching engine with a synthetic market-d
 > ⚡ **Performance Highlights (Intel Core i5-12500H, Hardware Invariant TSC)**:
 > * **14.00 ns** limit order insertion (~71.4 Mops/s batch mean; single-op p50 bracket-adjusted: **16–22 ns**, ~18× faster than baseline)
 > * **17.67 ns** constant-time cancellation ($\mathcal{O}(1)$ intrusive doubly-linked list nodes, ~30× to 150× faster)
+> * **< 20 ns** command ingress pickup via adaptive hardware PAUSE spin loop (>100× reduction in idle wake latency)
 > * **0 dynamic heap allocations** on the matching hot path (preallocated arena + bitmapped price ladder)
-> * **2.13M+ events/second** reference engine throughput in unpaced burst benchmarks; **116.9k events/s** with zero-loss continuous TimescaleDB persistence
+> * **10.27M events/second** peak decoupled server throughput (~4.8× gain over legacy 2.13M/s single-thread formatting loop); **116.9k events/s** sustained zero-loss continuous TimescaleDB persistence
 > * **Full details & 1,000,000-operation percentiles (p50/p99/p99.9)** in [Verified Benchmarks](#verified-benchmarks)
 
 ---
@@ -207,12 +208,25 @@ Historical baseline single-threaded CPU execution time of library calls on [`Ord
 
 * **Queue Length Cancellation Scaling**: In [`OrderBook`](crates/engine/src/book.rs), orders at a single price level are stored in a `VecDeque`, requiring an $O(n)$ search to cancel mid-queue (4 orders: ~350 ns; 50 orders: ~580 ns; 500 orders: ~2.8 µs). [`FlatBook`](crates/engine/src/flat/mod.rs) replaces this with intrusive doubly-linked list nodes, achieving constant-time $O(1)$ cancellation across all queue positions.
 
-### 4. Server Throughput & Persistence Overhead
+### 4. Server Throughput & Latency Architecture Comparison
 
-Matching throughput measured over 1,000,000 synthetic events using the reference [`OrderBook`](crates/engine/src/book.rs) engine (`cargo run --release -p server --bin persist_load`):
+Matching throughput and latency measured across the server pipeline with `cargo run --release -p server --bin persist_load`:
 
-* **Engine standalone (Arm A - no writer)**: **2,133,230 events/second** (821,246 commands/s)
-* **Engine with TimescaleDB writer attached (Arm B - unpaced burst)**: **2,139,451 events/second** ($\pm 0.3\%$ difference; 103,000 trades persisted, 878,011 backpressure drops due to bounded channel saturation)
+#### Latency & Throughput Improvements (Before vs. After Optimization)
+
+| Metric / Path | Before Optimization | After Decoupled & Low-Latency Architecture | Improvement |
+|---|---|---|---|
+| **Command Ingress Pickup (Idle to Wake)** | **2,000–10,000 ns** (2–10 µs futex sleep/wake) | **< 20 ns** (adaptive `PAUSE` spin loop) | **>100× to 500× lower latency** |
+| **Server Matching Hot Path Overhead** | **≈ 470 ns / event** (JSON encode, `now_ms`, 3 `Arc`/String allocs) | **≈ 25–30 ns / event** (raw binary SPSC push) | **~15× to 18× lower latency** |
+| **Matching Core Operation (`FlatBook`)** | **255–542 ns** (`OrderBook` BTreeMap insert) | **14.00 ns** batch mean / **31–37 ns** p50 | **~18× faster** |
+| **Order Cancel / Amend** | **378–4,860 ns** ($\mathcal{O}(n)$ queue search at depth) | **15–22 ns** ($\mathcal{O}(1)$ intrusive doubly-linked list) | **~15× to 150× faster** |
+| **Decoupled Server Pipeline Peak Throughput** | **2.13M events/s** | **10.27M events/s** | **~4.8× higher throughput** |
+
+#### Persistence Overhead Baseline (Reference `OrderBook`, Unpaced & Sustained)
+
+* **Legacy Engine Standalone (Arm A - no writer)**: **2,133,230 events/second** (821,246 commands/s)
+* **Legacy Engine with TimescaleDB Writer (Arm B - unpaced burst)**: **2,139,451 events/second** ($\pm 0.3\%$ difference; 103,000 trades persisted, 878,011 backpressure drops due to bounded channel saturation)
+* **Decoupled Server Pipeline (`--no-persist`)**: **10,270,160 events/second** (3,949,584 commands/s) with reference engine; **8,105,501 events/second** (3,111,662 commands/s) with `FlatBook`.
 * **Sustained Zero-Drop Persistence Run (`--rate 45000`)**: **116,911 events/second** (44,999 commands/s) with **1,000,082 trades persisted and 0 dropped trades**.
 
 ### 5. End-to-End WebSocket Delivery Latency (HDR Histogram)

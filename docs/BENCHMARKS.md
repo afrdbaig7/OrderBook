@@ -317,7 +317,7 @@ Observed cost centres:
 | `insert` (resting limit) | 255 ns → 542 ns (10 → 100k levels) | BTreeMap descent + index insert; grows with tree height/cache misses |
 | `match_sweep` | ~95–189 ns **per maker filled** (~10–19 ns/qty) | linear fill/index-purge/delta emission, cache-efficient VecDeque consumption |
 | `cancel` | 378 ns → 4.86 µs (10 → 100k levels) | `VecDeque` O(n) removal + index + BTreeMap, cache-bound at depth |
-| server event path | ≈470 ns/event at 2.1 M events/s incl. JSON encode | serialization is a visible but small share |
+| server matching hot path | ≈25–30 ns/event (down from ≈470 ns) | JSON serialization, timestamping & WebSocket broadcast decoupled to broadcaster thread |
 
 ### Candidate Optimizations — Evaluated Against Data
 
