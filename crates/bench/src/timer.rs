@@ -44,9 +44,12 @@ pub fn pin_thread_to_core(core_id: usize) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
+        // Guard against out-of-bounds access: cpu_set_t holds up to 1024 CPUs.
+        if core_id >= 1024 {
+            return false;
+        }
         unsafe {
             let mut set: libc::cpu_set_t = std::mem::zeroed();
-            libc::CPU_ZERO(&mut set);
             libc::CPU_SET(core_id, &mut set);
             libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
         }
