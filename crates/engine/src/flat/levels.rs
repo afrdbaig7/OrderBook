@@ -8,13 +8,15 @@
 use super::arena::SENTINEL;
 use crate::types::{Price, RejectReason, Side};
 
-/// Aggregate state for a single price tick.
+/// Aggregate state for a single price tick (padded to 32 bytes and 32-byte aligned).
+#[repr(C, align(32))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Level {
     pub total_qty: u64,
     pub head: u32,
     pub tail: u32,
     pub order_count: u32,
+    pub _pad: [u8; 12],
 }
 
 impl Default for Level {
@@ -25,6 +27,7 @@ impl Default for Level {
             head: SENTINEL,
             tail: SENTINEL,
             order_count: 0,
+            _pad: [0; 12],
         }
     }
 }
@@ -360,5 +363,11 @@ mod tests {
                 assert_eq!(bit_set, expected_set, "mismatch at tick {tick}");
             }
         }
+    }
+
+    #[test]
+    fn level_cache_alignment_and_size() {
+        assert_eq!(std::mem::size_of::<Level>(), 32);
+        assert_eq!(std::mem::align_of::<Level>(), 32);
     }
 }

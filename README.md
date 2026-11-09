@@ -3,10 +3,10 @@
 An experimental ultra-low latency Rust matching engine with a synthetic market-data dashboard. Built to explore deterministic execution semantics, stream reconstruction, failure recovery, and real-time continuous aggregation.
 
 > ⚡ **Performance Highlights (Intel Core i5-12500H, Hardware Invariant TSC)**:
-> * **14.00 ns** limit order insertion (~71.4 Mops/s batch mean, ~18× faster than baseline)
+> * **14.00 ns** limit order insertion (~71.4 Mops/s batch mean; single-op p50 bracket-adjusted: **16–22 ns**, ~18× faster than baseline)
 > * **17.67 ns** constant-time cancellation ($\mathcal{O}(1)$ intrusive doubly-linked list nodes, ~30× to 150× faster)
 > * **0 dynamic heap allocations** on the matching hot path (preallocated arena + bitmapped price ladder)
-> * **2.13M+ events/second** matching throughput with zero-loss TimescaleDB persistence writer attached
+> * **2.13M+ events/second** reference engine throughput in unpaced burst benchmarks; **116.9k events/s** with zero-loss continuous TimescaleDB persistence
 > * **Full details & 1,000,000-operation percentiles (p50/p99/p99.9)** in [Verified Benchmarks](#verified-benchmarks)
 
 ---
@@ -179,7 +179,7 @@ Timing is captured with an ordered, serializing hardware invariant TSC counter (
 | **Sweep (64 makers)** | Crossing sweep across 16 levels | 10,000 | 680 ns | 1,101 ns | 1,869 ns | 694.79 ns | 19.1 µs (1.42% >1µs) | **0 (verified)** | N/A |
 
 * **Zero Allocations**: Confirmed in [`crates/engine/tests/flat_zero_alloc.rs`](crates/engine/tests/flat_zero_alloc.rs) via an atomic allocator counter on the hot path.
-* **Single-Op vs. Batch Overhead**: The serializing bracket overhead (`_mm_lfence` + `__rdtscp`) accounts for ~15 ns of single-operation p50 measurements; batched measurements isolate pure execution cost to 14.0–14.7 ns per insert (up to **71.4 Mops/s**).
+* **Single-Op vs. Batch Overhead**: The serializing bracket overhead (`_mm_lfence` + `__rdtscp`) accounts for ~15 ns of single-operation p50 measurements; batched measurements isolate pure execution cost to 14.0–14.7 ns per insert (up to **71.4 Mops/s**). Subtracting the ~15 ns instrumentation bracket from individual p50 measurements (31–37 ns) yields approximately **16–22 ns of true per-operation latency** without pipeline overlap.
 
 ### 2. Head-to-Head Comparison: Reference `OrderBook` vs. `FlatBook`
 
@@ -207,11 +207,11 @@ Historical baseline single-threaded CPU execution time of library calls on [`Ord
 
 ### 4. Server Throughput & Persistence Overhead
 
-Matching throughput measured over 1,000,000 synthetic events:
+Matching throughput measured over 1,000,000 synthetic events using the reference [`OrderBook`](crates/engine/src/book.rs) engine (`cargo run --release -p server --bin persist_load`):
 
-* **Engine standalone**: **2,139,451 events/second**
-* **Engine with TimescaleDB writer attached**: **2,133,230 events/second** ($\pm 0.3\%$ difference)
-* **Trades persisted**: 1,000,082 trades generated and persisted with **0 dropped trades**.
+* **Engine standalone (Arm A - no writer)**: **2,133,230 events/second** (821,246 commands/s)
+* **Engine with TimescaleDB writer attached (Arm B - unpaced burst)**: **2,139,451 events/second** ($\pm 0.3\%$ difference; 103,000 trades persisted, 878,011 backpressure drops due to bounded channel saturation)
+* **Sustained Zero-Drop Persistence Run (`--rate 45000`)**: **116,911 events/second** (44,999 commands/s) with **1,000,082 trades persisted and 0 dropped trades**.
 
 ### 5. End-to-End WebSocket Delivery Latency (HDR Histogram)
 

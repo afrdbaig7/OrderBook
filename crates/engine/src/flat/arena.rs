@@ -10,15 +10,17 @@ use crate::types::{OrderId, Side};
 
 pub const SENTINEL: u32 = u32::MAX;
 
-/// A single order storage slot.
+/// A single order storage slot (exactly 32 bytes, 32-byte aligned to fit half a 64-byte cache line).
+#[repr(C, align(32))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
     pub id: OrderId,
-    pub side: Side,
-    pub price_tick: u32,
     pub qty: u64,
+    pub price_tick: u32,
     pub prev: u32,
     pub next: u32,
+    pub side: Side,
+    pub _pad: [u8; 3],
 }
 
 impl Default for Slot {
@@ -26,11 +28,12 @@ impl Default for Slot {
     fn default() -> Self {
         Self {
             id: OrderId(0),
-            side: Side::Bid,
-            price_tick: 0,
             qty: 0,
+            price_tick: 0,
             prev: SENTINEL,
             next: SENTINEL,
+            side: Side::Bid,
+            _pad: [0; 3],
         }
     }
 }
@@ -81,11 +84,12 @@ impl OrderArena {
         // Reset the slot completely on reuse
         self.slots[idx as usize] = Slot {
             id,
-            side,
-            price_tick,
             qty,
+            price_tick,
             prev: SENTINEL,
             next: SENTINEL,
+            side,
+            _pad: [0; 3],
         };
 
         self.allocated_count += 1;
@@ -156,5 +160,11 @@ mod tests {
         assert_eq!(slot.qty, 500);
         assert_eq!(slot.prev, SENTINEL);
         assert_eq!(slot.next, SENTINEL);
+    }
+
+    #[test]
+    fn slot_cache_alignment_and_size() {
+        assert_eq!(std::mem::size_of::<Slot>(), 32);
+        assert_eq!(std::mem::align_of::<Slot>(), 32);
     }
 }
