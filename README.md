@@ -1,6 +1,13 @@
 # Order Book
 
-An experimental Rust matching engine with a synthetic market-data dashboard. Built to explore deterministic execution semantics, stream reconstruction, failure recovery, and real-time continuous aggregation.
+An experimental ultra-low latency Rust matching engine with a synthetic market-data dashboard. Built to explore deterministic execution semantics, stream reconstruction, failure recovery, and real-time continuous aggregation.
+
+> ⚡ **Performance Highlights (Intel Core i5-12500H, Hardware Invariant TSC)**:
+> * **14.00 ns** limit order insertion (~71.4 Mops/s batch mean, ~18× faster than baseline)
+> * **17.67 ns** constant-time cancellation ($\mathcal{O}(1)$ intrusive doubly-linked list nodes, ~30× to 150× faster)
+> * **0 dynamic heap allocations** on the matching hot path (preallocated arena + bitmapped price ladder)
+> * **2.13M+ events/second** matching throughput with zero-loss TimescaleDB persistence writer attached
+> * **Full details & 1,000,000-operation percentiles (p50/p99/p99.9)** in [Verified Benchmarks](#verified-benchmarks)
 
 ---
 
