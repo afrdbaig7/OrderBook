@@ -30,20 +30,70 @@ Open **<http://127.0.0.1:5173>** in your browser.
 
 ---
 
-## Runnable Library Example
+## Runnable Library Examples
 
-The matching engine core ([`crates/engine`](crates/engine)) is a pure synchronous library with zero async, locking, or network dependencies. You can run the standalone matching example without starting Docker or the web interface:
+The matching engine core ([`crates/engine`](crates/engine)) is a pure synchronous library with zero async, locking, or network dependencies. You can run standalone matching examples without starting Docker or the web interface:
 
+### 1. Reference Engine (`OrderBook`) Example
 ```bash
 cargo run -p engine --example basic_matching
 ```
+Demonstrates dynamic limit order insertion, aggressive crossing maker-price fills, order amendments (`modify`) with FIFO priority preservation, order cancellations, and point-in-time L2 snapshot serialization.
 
-This demonstrates:
-1. Submitting resting limit orders (bids and asks).
-2. Submitting an aggressive crossing limit order (triggering maker-price execution and resting remainder).
-3. Amending or cancel-replacing resting orders (`modify`) with FIFO queue priority preservation.
-4. Cancelling an open resting order.
-5. Capturing a complete point-in-time L2 snapshot with monotonically assigned sequence numbers.
+### 2. Ultra-Low Latency Engine (`FlatBook`) Example
+```bash
+cargo run -p engine --example flat_matching
+```
+Demonstrates zero-allocation matching using the preallocated order arena, bitmapped price discovery, caller-owned event buffers, order amend with FIFO priority preservation, and snapshot capture with **0 dynamic heap allocations**.
+
+---
+
+## `FlatBook`: Ultra-Low Latency Zero-Allocation Matching Engine
+
+The matching engine crate ([`crates/engine`](crates/engine)) provides two distinct matching backends:
+1. **[`OrderBook`](crates/engine/src/book.rs) (Reference Engine)**: General-purpose engine using `BTreeMap` for sorted price levels and `VecDeque` for FIFO queues. Ideal for unbounded price ranges and arbitrary tick intervals.
+2. **[`FlatBook`](crates/engine/src/flat/mod.rs) (Optimized Low-Latency Engine)**: Hardware-conscious, cache-friendly architecture designed for sub-15ns order execution with **zero dynamic heap allocations on the hot path** (`#![forbid(unsafe_code)]`).
+
+### Architectural Pillars of `FlatBook`
+
+* **Hierarchical 2-Level Bitmapped Price Discovery**: Resolves Best Bid and Best Ask in ~1 CPU cycle using portable CPU bit-scan intrinsics (`trailing_zeros` for asks, `leading_zeros` for bids) across 64-bit words and a summary bitmask.
+* **Preallocated Contiguous Order Arena**: Resting orders are stored in a contiguous `Box<[Slot]>`. A singly-linked free list provides $\mathcal{O}(1)$ slot allocation and reuse without memory fragmentation.
+* **Intrusive Doubly-Linked Queue Nodes**: Orders at each price level form an intrusive doubly-linked list using 32-bit indices (`prev`/`next`). This enables **constant-time $\mathcal{O}(1)$ cancellations and amends at any position in the queue** (front, middle, or tail), completely eliminating the $\mathcal{O}(n)$ queue search of `VecDeque` implementations.
+* **Tombstone-Free Backward-Shift Deletion**: The `OrderId` to slot index mapping uses an open-addressing hash table with backward-shift deletion. Deletions fill gaps immediately, guaranteeing zero tombstones and preventing probe chain degradation over millions of cycles.
+* **Caller-Owned Reusable Event Buffers**: `submit_limit_into`, `modify_into`, and `cancel_into` write directly into preallocated caller-owned buffers, guaranteeing **0 bytes of dynamic heap allocation** during order execution.
+
+### `FlatBook` Benchmark Performance (1,000,000 Operations)
+
+Measured on Intel Core i5-12500H using hardware invariant TSC cycles (`_mm_lfence` + `__rdtscp` + `_mm_lfence`):
+
+| Operation | Batch Mean (Pure CPU) | p50 | p99 | p99.9 | Speedup vs Reference | Heap Allocations |
+|---|---|---|---|---|---|:---:|
+| **Limit Insert (Existing Level)** | **14.00 ns** (~71.4 Mops/s) | 37 ns | **78 ns** | **113 ns** | **~18× faster** | **0 bytes** |
+| **Limit Insert (New Level)** | **14.67 ns** (~68.2 Mops/s) | 31 ns | **44 ns** | **131 ns** | **~18× faster** | **0 bytes** |
+| **Order Cancel (Queue Front)** | **22.33 ns** | 33 ns | **55 ns** | **75 ns** | **~16× faster** | **0 bytes** |
+| **Order Cancel (Queue Mid / Tail)** | **17.67–18.67 ns** | 33 ns | **55 ns** | **81–90 ns** | **~30× to 150× faster** | **0 bytes** |
+| **Order Amend (`modify`)** | **15.20 ns** (queue preserved) | 34 ns | **62 ns** | **94 ns** | **~15× faster** | **0 bytes** |
+| **Unknown Order Reject** | **8.40 ns** | 25 ns | **28 ns** | **57 ns** | **~24× faster** | **0 bytes** |
+| **Mixed Workload (60/30/10)** | **25.85–35.10 ns** | 28–34 ns | **59–63 ns** | **119–143 ns** | **~9× to 11× faster** | **0 bytes** |
+
+### Running with `FlatBook`
+
+* **Run the Standalone Example**:
+  ```bash
+  cargo run -p engine --example flat_matching
+  ```
+* **Run the Backend Server with `FlatBook`**:
+  ```bash
+  cargo run --release -p server --bin server -- --engine flat --flat-base-price 100000 --flat-tick-count 512
+  ```
+* **Run Deterministic Replay Verification with `FlatBook`**:
+  ```bash
+  cargo run --release -p replay -- verify docs/recordings/basic.recording.jsonl --engine flat
+  ```
+* **Run Hardware TSC Benchmarks**:
+  ```bash
+  cargo run --release -p bench -- evaluate --samples 1000000
+  ```
 
 ---
 
