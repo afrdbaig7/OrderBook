@@ -45,3 +45,4 @@ mod tests {
         assert!(!pin_thread_to_core(usize::MAX));
     }
 }
+
