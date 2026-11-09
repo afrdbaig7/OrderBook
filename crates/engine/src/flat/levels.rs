@@ -32,13 +32,17 @@ impl Default for Level {
     }
 }
 
-/// Hierarchical bitmap for instant best-price resolution over 512 ticks.
+/// Hierarchical bitmap for instant best-price resolution over up to 4,096 ticks.
+///
+/// Inlines the 64-word bitmap (`[u64; 64]`) directly in the struct beside `summary`
+/// to eliminate pointer dereferencing and heap cache-misses on the hot path.
 #[derive(Clone, Debug)]
 pub struct LevelSide {
     pub levels: Box<[Level]>,
-    words: Box<[u64]>,
+    words: [u64; 64],
     summary: u64,
     tick_count: usize,
+    num_words: usize,
 }
 
 impl LevelSide {
@@ -52,15 +56,16 @@ impl LevelSide {
 
         Self {
             levels: vec![Level::default(); tick_count].into_boxed_slice(),
-            words: vec![0u64; num_words].into_boxed_slice(),
+            words: [0u64; 64],
             summary: 0,
             tick_count,
+            num_words,
         }
     }
 
     #[inline(always)]
     pub fn set_bit(&mut self, tick_idx: usize) {
-        let word_idx = tick_idx / 64;
+        let word_idx = (tick_idx / 64) & 63;
         let bit_idx = tick_idx % 64;
         self.words[word_idx] |= 1u64 << bit_idx;
         self.summary |= 1u64 << word_idx;
@@ -68,7 +73,7 @@ impl LevelSide {
 
     #[inline(always)]
     pub fn clear_bit(&mut self, tick_idx: usize) {
-        let word_idx = tick_idx / 64;
+        let word_idx = (tick_idx / 64) & 63;
         let bit_idx = tick_idx % 64;
         self.words[word_idx] &= !(1u64 << bit_idx);
         if self.words[word_idx] == 0 {
@@ -82,7 +87,7 @@ impl LevelSide {
         if self.summary == 0 {
             return None;
         }
-        let word_idx = self.summary.trailing_zeros() as usize;
+        let word_idx = (self.summary.trailing_zeros() as usize) & 63;
         let bit_idx = self.words[word_idx].trailing_zeros() as usize;
         let tick = word_idx * 64 + bit_idx;
         if tick < self.tick_count {
@@ -99,12 +104,12 @@ impl LevelSide {
             return None;
         }
         // Highest word with bits
-        let word_idx = 63 - (self.summary.leading_zeros() as usize);
-        if word_idx >= self.words.len() {
+        let word_idx = (63 - (self.summary.leading_zeros() as usize)) & 63;
+        if word_idx >= self.num_words {
             return None;
         }
-        let bit_idx = 63 - (self.words[word_idx].leading_zeros() as usize);
-        let tick = word_idx * 64 + bit_idx;
+        let bit_idx = self.words[word_idx].leading_zeros() as usize;
+        let tick = word_idx * 64 + (63 - bit_idx);
         if tick < self.tick_count {
             Some(tick)
         } else {
@@ -352,7 +357,7 @@ mod tests {
         assert_eq!(side.best_bid_tick(), Some(510));
 
         // Verify that best_ask_tick and best_bid_tick match brute-force scans
-        for (i, w) in side.words.iter().enumerate() {
+        for (i, w) in side.words[..side.num_words].iter().enumerate() {
             for b in 0..64 {
                 let tick = i * 64 + b;
                 if tick >= 512 {

@@ -176,6 +176,12 @@ impl FlatBook {
         Ok(())
     }
 
+    #[cold]
+    #[inline(never)]
+    fn push_reject(events: &mut Vec<Event>, seq: u64, id: OrderId, reason: RejectReason) {
+        events.push(Event::Reject { seq, id, reason });
+    }
+
     /// Submits a limit order into caller-owned `events` buffer.
     pub fn submit_limit_into(
         &mut self,
@@ -187,53 +193,54 @@ impl FlatBook {
 
         // 1. Validation before mutation (order matches OrderBook rejection priority)
         if order.id.0 > MAX_ORDER_ID {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id: order.id,
-                reason: RejectReason::OrderIdOutOfRange,
-            });
+            Self::push_reject(
+                events,
+                self.take_seq(),
+                order.id,
+                RejectReason::OrderIdOutOfRange,
+            );
             return Ok(());
         }
         if order.qty == 0 {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id: order.id,
-                reason: RejectReason::ZeroQuantity,
-            });
+            Self::push_reject(
+                events,
+                self.take_seq(),
+                order.id,
+                RejectReason::ZeroQuantity,
+            );
             return Ok(());
         }
         if order.qty > MAX_ORDER_QTY {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id: order.id,
-                reason: RejectReason::QuantityOutOfRange,
-            });
+            Self::push_reject(
+                events,
+                self.take_seq(),
+                order.id,
+                RejectReason::QuantityOutOfRange,
+            );
             return Ok(());
         }
         if order.price.0 == 0 {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id: order.id,
-                reason: RejectReason::ZeroPrice,
-            });
+            Self::push_reject(events, self.take_seq(), order.id, RejectReason::ZeroPrice);
             return Ok(());
         }
         if order.price.0 > MAX_PRICE {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id: order.id,
-                reason: RejectReason::PriceOutOfRange,
-            });
+            Self::push_reject(
+                events,
+                self.take_seq(),
+                order.id,
+                RejectReason::PriceOutOfRange,
+            );
             return Ok(());
         }
         let entry = self.id_index.find_entry(order.id);
         let (vacant_bucket, vacant_version) = match entry {
             id_index::EntrySlot::Occupied => {
-                events.push(Event::Reject {
-                    seq: self.take_seq(),
-                    id: order.id,
-                    reason: RejectReason::DuplicateOrderId,
-                });
+                Self::push_reject(
+                    events,
+                    self.take_seq(),
+                    order.id,
+                    RejectReason::DuplicateOrderId,
+                );
                 return Ok(());
             }
             id_index::EntrySlot::Full => {
@@ -326,11 +333,12 @@ impl FlatBook {
                 .checked_add(remaining)
                 .is_none_or(|q| q > MAX_LEVEL_QTY)
             {
-                events.push(Event::Reject {
-                    seq: self.take_seq(),
-                    id: order.id,
-                    reason: RejectReason::LevelQuantityOverflow,
-                });
+                Self::push_reject(
+                    events,
+                    self.take_seq(),
+                    order.id,
+                    RejectReason::LevelQuantityOverflow,
+                );
                 return Ok(());
             }
 
@@ -379,35 +387,24 @@ impl FlatBook {
         events.clear();
 
         if id.0 > MAX_ORDER_ID {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::OrderIdOutOfRange,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::OrderIdOutOfRange);
             return Ok(());
         }
         if qty == 0 {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::ZeroQuantity,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::ZeroQuantity);
             return Ok(());
         }
         if qty > MAX_ORDER_QTY {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
+            Self::push_reject(
+                events,
+                self.take_seq(),
                 id,
-                reason: RejectReason::QuantityOutOfRange,
-            });
+                RejectReason::QuantityOutOfRange,
+            );
             return Ok(());
         }
         if self.id_index.contains(id) {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::DuplicateOrderId,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::DuplicateOrderId);
             return Ok(());
         }
 
@@ -444,11 +441,7 @@ impl FlatBook {
         }
 
         if remaining > 0 {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::MarketUnfilled,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::MarketUnfilled);
         }
 
         Ok(())
@@ -460,22 +453,14 @@ impl FlatBook {
         events.clear();
 
         if id.0 > MAX_ORDER_ID {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::OrderIdOutOfRange,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::OrderIdOutOfRange);
             return Ok(());
         }
 
         let slot_idx = match self.id_index.remove(id) {
             Some(idx) => idx,
             None => {
-                events.push(Event::Reject {
-                    seq: self.take_seq(),
-                    id,
-                    reason: RejectReason::UnknownCancel,
-                });
+                Self::push_reject(events, self.take_seq(), id, RejectReason::UnknownCancel);
                 return Ok(());
             }
         };
@@ -527,43 +512,28 @@ impl FlatBook {
         events.clear();
 
         if id.0 > MAX_ORDER_ID {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::OrderIdOutOfRange,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::OrderIdOutOfRange);
             return Ok(());
         }
         if new_qty == 0 {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::ZeroQuantity,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::ZeroQuantity);
             return Ok(());
         }
         if new_qty > MAX_ORDER_QTY {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
+            Self::push_reject(
+                events,
+                self.take_seq(),
                 id,
-                reason: RejectReason::QuantityOutOfRange,
-            });
+                RejectReason::QuantityOutOfRange,
+            );
             return Ok(());
         }
         if new_price.0 == 0 {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::ZeroPrice,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::ZeroPrice);
             return Ok(());
         }
         if new_price.0 > MAX_PRICE {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::PriceOutOfRange,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::PriceOutOfRange);
             return Ok(());
         }
 
@@ -581,11 +551,7 @@ impl FlatBook {
         let slot_idx = match self.id_index.get(id) {
             Some(idx) => idx,
             None => {
-                events.push(Event::Reject {
-                    seq: self.take_seq(),
-                    id,
-                    reason: RejectReason::UnknownOrder,
-                });
+                Self::push_reject(events, self.take_seq(), id, RejectReason::UnknownOrder);
                 return Ok(());
             }
         };
@@ -608,11 +574,12 @@ impl FlatBook {
                     .checked_add(diff)
                     .is_none_or(|q| q > MAX_LEVEL_QTY)
                 {
-                    events.push(Event::Reject {
-                        seq: self.take_seq(),
+                    Self::push_reject(
+                        events,
+                        self.take_seq(),
                         id,
-                        reason: RejectReason::LevelQuantityOverflow,
-                    });
+                        RejectReason::LevelQuantityOverflow,
+                    );
                     return Ok(());
                 }
             }
@@ -702,11 +669,12 @@ impl FlatBook {
                 .checked_add(remaining)
                 .is_none_or(|q| q > MAX_LEVEL_QTY)
             {
-                events.push(Event::Reject {
-                    seq: self.take_seq(),
+                Self::push_reject(
+                    events,
+                    self.take_seq(),
                     id,
-                    reason: RejectReason::LevelQuantityOverflow,
-                });
+                    RejectReason::LevelQuantityOverflow,
+                );
                 return Ok(());
             }
 
@@ -753,22 +721,14 @@ impl FlatBook {
         events.clear();
 
         if id.0 > MAX_ORDER_ID {
-            events.push(Event::Reject {
-                seq: self.take_seq(),
-                id,
-                reason: RejectReason::OrderIdOutOfRange,
-            });
+            Self::push_reject(events, self.take_seq(), id, RejectReason::OrderIdOutOfRange);
             return Ok(0);
         }
 
         let (slot_idx, buckets_moved) = match self.id_index.remove_with_shift_count(id) {
             (Some(idx), moved) => (idx, moved),
             (None, _) => {
-                events.push(Event::Reject {
-                    seq: self.take_seq(),
-                    id,
-                    reason: RejectReason::UnknownCancel,
-                });
+                Self::push_reject(events, self.take_seq(), id, RejectReason::UnknownCancel);
                 return Ok(0);
             }
         };

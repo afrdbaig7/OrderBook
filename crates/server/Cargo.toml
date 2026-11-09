@@ -31,6 +31,9 @@ sqlx = { workspace = true }
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "server"
 path = "src/main.rs"

@@ -74,6 +74,7 @@ impl Default for ReplayEngineConfig {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ReplayEngineKind {
     Reference(OrderBook),
     Flat(FlatBook),

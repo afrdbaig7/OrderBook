@@ -14,6 +14,7 @@
 //! Bounded channels limit queued work. Slow sockets disconnect, and persistence
 //! overflow drops trades and increments a counter.
 
+pub mod affinity;
 pub mod api;
 pub mod db;
 pub mod engine_thread;
@@ -35,7 +36,10 @@ use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-pub use crate::engine_thread::{EngineCommand, EngineKind, EngineType, ServerEvent, TradeRow};
+pub use crate::affinity::pin_thread_to_core;
+pub use crate::engine_thread::{
+    EngineCommand, EngineKind, EngineThreadConfig, EngineType, ServerEvent, TradeRow,
+};
 pub use crate::metrics::Metrics;
 pub use crate::state::{AppState, Persistence};
 
@@ -94,6 +98,12 @@ pub struct Args {
     /// Maximum resting orders for FlatBook when --engine flat is used.
     #[arg(long = "flat-max-orders", default_value_t = 16_384)]
     pub flat_max_orders: usize,
+    /// Dedicated CPU logical core to pin the matching engine thread (optional, Windows & Linux).
+    #[arg(long = "engine-core")]
+    pub engine_core: Option<usize>,
+    /// Enable 100% busy-spin polling loop on engine command ingress instead of adaptive backoff.
+    #[arg(long = "busy-spin", default_value_t = false)]
+    pub busy_spin: bool,
 }
 
 impl Args {
@@ -184,12 +194,19 @@ pub async fn run(args: Args) {
         }
     };
 
-    let engine_handle = engine_thread::spawn(
+    let engine_config = EngineThreadConfig {
+        pin_core: args.engine_core,
+        busy_spin: args.busy_spin,
+        outbound_capacity: args.broadcast_capacity.max(ENGINE_CHANNEL_CAPACITY * 2),
+    };
+
+    let engine_handle = engine_thread::spawn_with_config(
         engine_kind,
         cmd_rx,
         broadcast_tx.clone(),
         db_tx,
         metrics.clone(),
+        engine_config,
     );
 
     // Synthetic order flow (paced by this task, not by the feed crate).

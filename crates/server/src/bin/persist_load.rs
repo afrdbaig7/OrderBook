@@ -24,7 +24,9 @@ use clap::Parser;
 use crossbeam_channel::bounded;
 use engine::OrderBook;
 use feed::{FeedConfig, SyntheticFeed};
-use server::engine_thread::{self, EngineCommand, ServerEvent};
+use server::engine_thread::{
+    self, EngineCommand, EngineKind, EngineThreadConfig, EngineType, ServerEvent,
+};
 use server::metrics::Metrics;
 use server::{ENGINE_CHANNEL_CAPACITY, PERSIST_CAPACITY};
 use tokio::sync::{broadcast, watch};
@@ -57,6 +59,24 @@ struct Args {
     /// Safety stop so a misconfigured run cannot spin forever.
     #[arg(long = "timeout-secs", default_value_t = 300)]
     timeout_secs: u64,
+    /// Engine implementation variant: "reference" (dynamic BTreeMap) or "flat" (ultra-low latency, zero allocation).
+    #[arg(long = "engine", value_enum, default_value_t = EngineType::Reference)]
+    engine: EngineType,
+    /// Base price tick for FlatBook when --engine flat is used.
+    #[arg(long = "flat-base-price", default_value_t = 98_000)]
+    flat_base_price: u64,
+    /// Number of price levels for FlatBook when --engine flat is used.
+    #[arg(long = "flat-tick-count", default_value_t = 4_096)]
+    flat_tick_count: usize,
+    /// Maximum resting orders for FlatBook when --engine flat is used.
+    #[arg(long = "flat-max-orders", default_value_t = 16_384)]
+    flat_max_orders: usize,
+    /// Dedicated CPU logical core to pin the matching engine thread (optional, Windows & Linux).
+    #[arg(long = "engine-core")]
+    engine_core: Option<usize>,
+    /// Enable 100% busy-spin polling loop on engine command ingress instead of adaptive backoff.
+    #[arg(long = "busy-spin", default_value_t = false)]
+    busy_spin: bool,
 }
 
 #[tokio::main]
@@ -82,12 +102,33 @@ async fn main() {
         (None, None)
     };
 
-    let engine = engine_thread::spawn(
-        OrderBook::new(),
+    let engine_kind: EngineKind = match args.engine {
+        EngineType::Reference => EngineKind::Reference(OrderBook::new()),
+        EngineType::Flat => {
+            let config = engine::FlatBookConfig {
+                max_orders: args.flat_max_orders,
+                base_price: args.flat_base_price,
+                tick_count: args.flat_tick_count,
+            };
+            let flat = engine::FlatBook::new(config)
+                .expect("failed to initialize FlatBook with configured parameters");
+            EngineKind::Flat(flat)
+        }
+    };
+
+    let engine_config = EngineThreadConfig {
+        pin_core: args.engine_core,
+        busy_spin: args.busy_spin,
+        outbound_capacity: 131_072,
+    };
+
+    let engine = engine_thread::spawn_with_config(
+        engine_kind,
         cmd_rx,
         broadcast_tx,
         db_tx,
         metrics.clone(),
+        engine_config,
     );
 
     // The writer runs on a worker thread while the producer loop below blocks
@@ -108,8 +149,8 @@ async fn main() {
     };
 
     println!(
-        "persist_load: seed={} target_trades={} persistence={} rate={}",
-        args.seed, args.target_trades, persist, args.rate
+        "persist_load: engine={} seed={} target_trades={} persistence={} rate={}",
+        args.engine, args.seed, args.target_trades, persist, args.rate
     );
 
     let mut feed = SyntheticFeed::new(FeedConfig {

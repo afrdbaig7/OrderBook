@@ -102,22 +102,22 @@ Measured on Intel Core i5-12500H using hardware invariant TSC cycles (`_mm_lfenc
 The matching core is isolated from network I/O, asynchronous execution, and database persistence:
 
 ```text
- ┌───────────────────────────┐      ┌─────────────────────────────┐      ┌──────────────────────────┐
- │     Feed Task (Tokio)     │      │  Engine Thread (std::thread)│      │  Broadcast Stream (Tokio)│
- │                           │      │                             │      │                          │
- │  SyntheticFeed            │      │  Exclusive single-thread    │      │  ServerEvent broadcast   │
- │  .next_command()          │───►  │  ownership (no async,       │───►  │  to connected WebSockets │
- │                           │      │  no locks on the book)      │      │  (/ws)                   │
- └───────────────────────────┘      └──────────────┬──────────────┘      └──────────────────────────┘
-                                                   │
-                                                   │ trades (try_send)
-                                                   ▼
-                                    ┌─────────────────────────────┐
-                                    │    DB Writer Task (Tokio)   │
-                                    │                             │
-                                    │  Batched unnest insert      │───►  TimescaleDB (trades)
-                                    │  (drops + counts if full)   │      Continuous aggregate (candles_1s)
-                                    └─────────────────────────────┘
+ ┌───────────────────────────┐      ┌─────────────────────────────┐      ┌───────────────────────────┐      ┌──────────────────────────┐
+ │     Feed Task (Tokio)     │      │ Engine Thread (std::thread) │      │Broadcaster Thread (std)   │      │ Broadcast Stream (Tokio) │
+ │                           │      │                             │      │                           │      │                          │
+ │  SyntheticFeed            │      │  Zero-Allocation Matching   │      │  JSON encode (serde_json) │───►  │  ServerEvent broadcast   │
+ │  .next_command()          │───►  │  Adaptive busy-spin ingress │───►  │  now_ms() timestamping    │      │  to connected WebSockets │
+ │                           │      │  SPSC binary event emission │      │  Websocket & DB dispatch  │      │  (/ws)                   │
+ └───────────────────────────┘      └──────────────┬──────────────┘      └─────────────┬─────────────┘      └──────────────────────────┘
+                                                   │                                   │
+                                            (Optional core pin)                        │ trades (try_send)
+                                                                                       ▼
+                                                                        ┌─────────────────────────────┐
+                                                                        │    DB Writer Task (Tokio)   │
+                                                                        │                             │
+                                                                        │  Batched unnest insert      │───►  TimescaleDB (trades)
+                                                                        │  (drops + counts if full)   │      Continuous aggregate (candles_1s)
+                                                                        └─────────────────────────────┘
 ```
 
 ### Component Responsibilities
@@ -126,14 +126,16 @@ The matching core is isolated from network I/O, asynchronous execution, and data
 |---|---|---|
 | **`engine`** | [`crates/engine`](crates/engine) | Pure matching core enforcing `#![forbid(unsafe_code)]`. Contains both reference [`OrderBook`](crates/engine/src/book.rs) (`BTreeMap` + `VecDeque`) and ultra-low latency, zero-allocation [`FlatBook`](crates/engine/src/flat/mod.rs) (preallocated order arena, 2-level bitmapped price ladder, open-addressing index). |
 | **`feed`** | [`crates/feed`](crates/feed) | Wire protocol serialization, deterministic synthetic order flow, and reference client-side book reconstruction (`ClientBook`). Enforces `#![forbid(unsafe_code)]`. |
-| **`server`** | [`crates/server`](crates/server) | Dedicated OS matching thread, Tokio async runtime, WebSocket/HTTP endpoints, bounded channel coordination, metrics, and batched TimescaleDB writer. |
+| **`server`** | [`crates/server`](crates/server) | Dedicated OS matching thread decoupled from Tokio async runtime via lock-free SPSC event ring, dedicated broadcaster thread, adaptive busy-spin ingress, CPU core pinning (Windows & Linux), WebSocket/HTTP endpoints, and batched TimescaleDB writer. |
 | **`bench`** | [`crates/bench`](crates/bench) | Criterion micro-benchmarks, hardware invariant TSC timer (`_mm_lfence` + `__rdtscp`), HDR histogram latency harness, and micro-architectural profiler. |
 | **`replay`** | [`crates/replay`](crates/replay) | Offline command recording and verification of engine events and final state. |
 | **`web`** | [`web`](web) | Vite, React, and TypeScript dashboard: live depth ladder, trade tape, 1s candlestick chart (`lightweight-charts`), and feed rate control. |
 
 ### Synchronization & Backpressure Model
 
-* **Exclusive Single-Thread Ownership**: The order book is owned by a single standard OS thread without locks or async runtimes. Tokio tasks communicate with the engine thread strictly through bounded `crossbeam-channel` queues.
+* **Decoupled Matching & Broadcasting**: The matching core executes with zero heap allocations, pushing raw binary `Event`s directly into a preallocated SPSC ring buffer. JSON serialization, `now_ms()` timestamping syscalls, and WebSocket channel sends are offloaded to an independent broadcaster thread.
+* **Adaptive Busy-Spin Ingress**: The engine thread employs hardware `spin_loop` (PAUSE instructions) on command ingress for sub-microsecond burst responsiveness without futex sleep/wake penalties, while falling back to short sleep during prolonged idle periods.
+* **Dedicated CPU Core Pinning**: The engine thread supports deterministic CPU core affinity pinning on both Windows (`SetThreadAffinityMask`) and Linux (`sched_setaffinity`) via `--engine-core <id>`.
 * **WebSocket Backpressure**: Live market events are broadcast through a bounded ring buffer (`BROADCAST_CAPACITY = 65,536`). If a slow consumer lags behind the buffer capacity, the server closes the connection, forcing the client to reconnect and resynchronize with a fresh snapshot.
 * **Persistence Decoupling**: Executed trades are buffered in a bounded channel (`PERSIST_CAPACITY = 100,000`). If TimescaleDB falls behind, incoming trades are dropped and counted in the `persistence_drops` metric—disk I/O never blocks order matching.
 * **Persistence Scope**: TimescaleDB stores executed trade market data and generates 1-second continuous aggregate candles (`candles_1s`). It is an analytical market-data store, **not** an order-level transaction journal or crash-recovery ledger.
